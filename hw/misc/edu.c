@@ -60,8 +60,8 @@ typedef struct {
 
 #define EDU_DMA_RUN             0x1
 #define EDU_DMA_DIR(cmd)        (((cmd) & 0x2) >> 1)
-# define EDU_DMA_FROM_PCI       0
-# define EDU_DMA_TO_PCI         1
+#define EDU_DMA_FROM_PCI       0
+#define EDU_DMA_TO_PCI         1
 #define EDU_DMA_IRQ             0x4
     struct dma_state {
         dma_addr_t src;
