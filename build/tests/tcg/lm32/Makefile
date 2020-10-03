@@ -1,1 +1,0 @@
-/home/giacomo/Desktop/tesi/qemu/tests/tcg/lm32/Makefile
