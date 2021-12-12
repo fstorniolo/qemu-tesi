@@ -450,8 +450,12 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
     addr = addr & NEWDEV_BUF_MASK;
     index = addr >> 2;
 
+
+    DBG("INSIDE BUFMMIO WRITE");
+    DBG("Addr: %ld, Index: %d", addr, index);
+
     if (addr + size > NEWDEV_BUF_SIZE * sizeof(uint32_t)) {
-        DBG("Out of bounds BUF read, addr=0x%08"PRIx64, addr);
+        DBG("Out of bounds BUF write, addr=0x%08"PRIx64, addr);
         return;
     }
 
@@ -530,6 +534,7 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                 break;
             }
         default:
+            DBG("WRITING IN THE BUFFER: %lu AT INDEX: %d" , val, index);
             newdev->buf[index] = val;
             break;
     }
