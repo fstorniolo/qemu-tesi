@@ -30,6 +30,7 @@
 #include "qemu/main-loop.h" /* iothread mutex */
 #include "qemu/module.h"
 #include "qapi/visitor.h"
+#include "qemu/range.h"
 
 #include <sys/inotify.h>
 #include <errno.h>
@@ -109,10 +110,25 @@ static const char *regnames[] = {
     "LOWER_IRQ",
 };
 
+typedef struct NewdevTranslateEntry {
+    uint64_t gpa_start;
+    uint64_t gpa_end;
+    uint64_t size;
+    void *hva_start;
+    MemoryRegion *mr;
+} NewdevTranslateEntry;
+
 typedef struct {
     PCIDevice pdev;
     MemoryRegion regs;
     MemoryRegion mmio;
+
+    // Used for address translation
+    MemoryListener memory_listener;
+    NewdevTranslateEntry *trans_entries;
+    unsigned int num_trans_entries;
+    NewdevTranslateEntry *trans_entries_tmp;
+    unsigned int num_trans_entries_tmp;
 
     /* Storage for the I/O registers. */
     uint32_t ioregs[NEWDEV_REG_END >> 2];
@@ -591,6 +607,120 @@ static int make_socket (uint16_t port){
   return sock;
 }
 
+static void
+newdev_memli_begin(MemoryListener *listener)
+{
+    NewdevState *s = container_of(listener, NewdevState, memory_listener);
+
+    s->num_trans_entries_tmp = 0;
+    s->trans_entries_tmp = NULL;
+}
+
+static void
+newdev_memli_region_add(MemoryListener *listener,
+                       MemoryRegionSection *section)
+{
+    NewdevState *s = container_of(listener, NewdevState, memory_listener);
+    uint64_t size = int128_get64(section->size);
+    uint64_t gpa_start = section->offset_within_address_space;
+    uint64_t gpa_end = range_get_last(gpa_start, size) + 1;
+    void *hva_start;
+    NewdevTranslateEntry *last = NULL;
+    bool add_entry = true;
+
+    if (!memory_region_is_ram(section->mr)) {
+        return;
+    }
+
+    hva_start = memory_region_get_ram_ptr(section->mr) +
+                      section->offset_within_region;
+#if NEWDEV_DEBUG > 1
+    DBG("new memory section %lx-%lx sz %lx %p", gpa_start, gpa_end,
+        size, hva_start);
+#endif
+    if (s->num_trans_entries_tmp > 0) {
+        /* Check if we can coalasce the last MemoryRegionSection to
+         * the current one. */
+        last = s->trans_entries_tmp + s->num_trans_entries_tmp - 1;
+        if (gpa_start == last->gpa_end &&
+            hva_start == last->hva_start + last->size) {
+            add_entry = false;
+            last->gpa_end = gpa_end;
+            last->size += size;
+        }
+    }
+
+    if (add_entry) {
+        s->num_trans_entries_tmp++;
+        s->trans_entries_tmp = g_renew(NewdevTranslateEntry,
+            s->trans_entries_tmp, s->num_trans_entries_tmp);
+        last = s->trans_entries_tmp + s->num_trans_entries_tmp - 1;
+        last->gpa_start = gpa_start;
+        last->gpa_end = gpa_end;
+        last->size = size;
+        last->hva_start = hva_start;
+        last->mr = section->mr;
+        memory_region_ref(last->mr);
+    }
+}
+
+static void
+newdev_memli_commit(MemoryListener *listener)
+{
+    NewdevState *s = container_of(listener, NewdevState, memory_listener);
+    NewdevTranslateEntry *old_trans_entries;
+    int num_old_trans_entries;
+    int i;
+
+    old_trans_entries = s->trans_entries;
+    num_old_trans_entries = s->num_trans_entries;
+    s->trans_entries = s->trans_entries_tmp;
+    s->num_trans_entries = s->num_trans_entries_tmp;
+
+#if NEWDEV_DEBUG > 1
+    for (i = 0; i < s->num_trans_entries; i++) {
+        NewdevTranslateEntry *te = s->trans_entries + i;
+        DBG("    entry %d: gpa %lx-%lx size %lx hva_start %p", i,
+            te->gpa_start, te->gpa_end, te->size, te->hva_start);
+    }
+#endif
+
+    s->trans_entries_tmp = NULL;
+    s->num_trans_entries_tmp = 0;
+    for (i = 0; i < num_old_trans_entries; i++) {
+        NewdevTranslateEntry *te = old_trans_entries + i;
+        memory_region_unref(te->mr);
+    }
+    g_free(old_trans_entries);
+}
+
+static inline void *
+newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len)
+{
+    NewdevTranslateEntry *te = s->trans_entries + 0;
+
+    if (unlikely(!(te->gpa_start <= gpa && gpa + len <= te->gpa_end))) {
+        int i;
+
+        for (i = 1; i < s->num_trans_entries; i++) {
+            te = s->trans_entries + i;
+            if (te->gpa_start <= gpa && gpa + len <= te->gpa_end) {
+                /* Match. Move this entry to the first position. */
+                NewdevTranslateEntry tmp = *te;
+                *te = s->trans_entries[0];
+                s->trans_entries[0] = tmp;
+                te = s->trans_entries + 0;
+                break;
+            }
+        }
+        assert(i < s->num_trans_entries);
+    }
+
+    return te->hva_start + (gpa - te->gpa_start);
+
+}
+
+
 static void newdev_realize(PCIDevice *pdev, Error **errp)
 {
     NewdevState *newdev = NEWDEV(pdev);
@@ -639,6 +769,15 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     DBG("listen\n");
 
     qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);        
+
+    // Configure memory listener
+    newdev->memory_listener.priority = 10,
+    newdev->memory_listener.begin = newdev_memli_begin,
+    newdev->memory_listener.commit = newdev_memli_commit,
+    newdev->memory_listener.region_add = newdev_memli_region_add,
+    newdev->memory_listener.region_nop = newdev_memli_region_add,
+    memory_listener_register(&newdev->memory_listener, &address_space_memory);
+    
     
     DBG("qemu listen_fd added");
 
