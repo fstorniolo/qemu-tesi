@@ -52,7 +52,7 @@
 
 /* Debug information. Define it as 1 get for basic debugging,
  * and as 2 to get additional (verbose) memory listener logs. */
-#define NEWDEV_DEBUG 1
+#define NEWDEV_DEBUG 2
 
 #if NEWDEV_DEBUG > 0
 #define DBG(fmt, ...) do { \
@@ -610,6 +610,7 @@ static int make_socket (uint16_t port){
 static void
 newdev_memli_begin(MemoryListener *listener)
 {
+    DBG("Inside newdev_memli_begin");
     NewdevState *s = container_of(listener, NewdevState, memory_listener);
 
     s->num_trans_entries_tmp = 0;
@@ -620,6 +621,7 @@ static void
 newdev_memli_region_add(MemoryListener *listener,
                        MemoryRegionSection *section)
 {
+    DBG("Inside newdev_memli_region_add");
     NewdevState *s = container_of(listener, NewdevState, memory_listener);
     uint64_t size = int128_get64(section->size);
     uint64_t gpa_start = section->offset_within_address_space;
@@ -667,6 +669,7 @@ newdev_memli_region_add(MemoryListener *listener,
 static void
 newdev_memli_commit(MemoryListener *listener)
 {
+    DBG("Inside newdev_memli_commit");
     NewdevState *s = container_of(listener, NewdevState, memory_listener);
     NewdevTranslateEntry *old_trans_entries;
     int num_old_trans_entries;
@@ -697,6 +700,7 @@ newdev_memli_commit(MemoryListener *listener)
 static inline void *
 newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len)
 {
+    DBG("Inside newdev_translate_addr");
     NewdevTranslateEntry *te = s->trans_entries + 0;
 
     if (unlikely(!(te->gpa_start <= gpa && gpa + len <= te->gpa_end))) {
