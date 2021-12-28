@@ -6,7 +6,7 @@
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * version 2.1 of the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,22 +19,25 @@
 
 #include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qemu/datadir.h"
 #include "qemu/units.h"
+#include "qemu/cutils.h"
 #include "qapi/error.h"
+#include "sysemu/qtest.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/numa.h"
 #include "sysemu/reset.h"
 #include "sysemu/runstate.h"
 #include "sysemu/cpus.h"
 #include "sysemu/device_tree.h"
+#include "sysemu/hw_accel.h"
 #include "target/ppc/cpu.h"
-#include "qemu/log.h"
 #include "hw/ppc/fdt.h"
 #include "hw/ppc/ppc.h"
 #include "hw/ppc/pnv.h"
 #include "hw/ppc/pnv_core.h"
 #include "hw/loader.h"
-#include "exec/address-spaces.h"
+#include "hw/nmi.h"
 #include "qapi/visitor.h"
 #include "monitor/monitor.h"
 #include "hw/intc/intc.h"
@@ -48,7 +51,6 @@
 #include "hw/ppc/pnv_pnor.h"
 
 #include "hw/isa/isa.h"
-#include "hw/boards.h"
 #include "hw/char/serial.h"
 #include "hw/rtc/mc146818rtc.h"
 
@@ -58,12 +60,12 @@
 
 #define FW_FILE_NAME            "skiboot.lid"
 #define FW_LOAD_ADDR            0x0
-#define FW_MAX_SIZE             (4 * MiB)
+#define FW_MAX_SIZE             (16 * MiB)
 
 #define KERNEL_LOAD_ADDR        0x20000000
-#define KERNEL_MAX_SIZE         (256 * MiB)
-#define INITRD_LOAD_ADDR        0x60000000
-#define INITRD_MAX_SIZE         (256 * MiB)
+#define KERNEL_MAX_SIZE         (128 * MiB)
+#define INITRD_LOAD_ADDR        0x28000000
+#define INITRD_MAX_SIZE         (128 * MiB)
 
 static const char *pnv_chip_core_typename(const PnvChip *o)
 {
@@ -194,7 +196,7 @@ static void pnv_dt_core(PnvChip *chip, PnvCore *pc, void *fdt)
     _FDT((fdt_setprop_string(fdt, offset, "status", "okay")));
     _FDT((fdt_setprop(fdt, offset, "64-bit", NULL, 0)));
 
-    if (env->spr_cb[SPR_PURR].oea_read) {
+    if (ppc_has_spr(cpu, SPR_PURR)) {
         _FDT((fdt_setprop(fdt, offset, "ibm,purr", NULL, 0)));
     }
 
@@ -520,7 +522,7 @@ static void *pnv_dt_create(MachineState *machine)
     buf =  qemu_uuid_unparse_strdup(&qemu_uuid);
     _FDT((fdt_setprop_string(fdt, 0, "vm,uuid", buf)));
     if (qemu_uuid_set) {
-        _FDT((fdt_property_string(fdt, "system-id", buf)));
+        _FDT((fdt_setprop_string(fdt, 0, "system-id", buf)));
     }
     g_free(buf);
 
@@ -585,9 +587,11 @@ static void pnv_reset(MachineState *machine)
     bmc = pnv_bmc_find(&error_fatal);
     if (!pnv->bmc) {
         if (!bmc) {
-            warn_report("machine has no BMC device. Use '-device "
-                        "ipmi-bmc-sim,id=bmc0 -device isa-ipmi-bt,bmc=bmc0,irq=10' "
-                        "to define one");
+            if (!qtest_enabled()) {
+                warn_report("machine has no BMC device. Use '-device "
+                            "ipmi-bmc-sim,id=bmc0 -device isa-ipmi-bt,bmc=bmc0,irq=10' "
+                            "to define one");
+            }
         } else {
             pnv_bmc_set_pnor(bmc, pnv->pnor);
             pnv->bmc = bmc;
@@ -634,32 +638,47 @@ static ISABus *pnv_isa_create(PnvChip *chip, Error **errp)
     return PNV_CHIP_GET_CLASS(chip)->isa_create(chip, errp);
 }
 
+static int pnv_chip_power8_pic_print_info_child(Object *child, void *opaque)
+{
+    Monitor *mon = opaque;
+    PnvPHB3 *phb3 = (PnvPHB3 *) object_dynamic_cast(child, TYPE_PNV_PHB3);
+
+    if (phb3) {
+        pnv_phb3_msi_pic_print_info(&phb3->msis, mon);
+        ics_pic_print_info(&phb3->lsis, mon);
+    }
+    return 0;
+}
+
 static void pnv_chip_power8_pic_print_info(PnvChip *chip, Monitor *mon)
 {
     Pnv8Chip *chip8 = PNV8_CHIP(chip);
-    int i;
 
     ics_pic_print_info(&chip8->psi.ics, mon);
-    for (i = 0; i < chip->num_phbs; i++) {
-        pnv_phb3_msi_pic_print_info(&chip8->phbs[i].msis, mon);
-        ics_pic_print_info(&chip8->phbs[i].lsis, mon);
+    object_child_foreach(OBJECT(chip),
+                         pnv_chip_power8_pic_print_info_child, mon);
+}
+
+static int pnv_chip_power9_pic_print_info_child(Object *child, void *opaque)
+{
+    Monitor *mon = opaque;
+    PnvPHB4 *phb4 = (PnvPHB4 *) object_dynamic_cast(child, TYPE_PNV_PHB4);
+
+    if (phb4) {
+        pnv_phb4_pic_print_info(phb4, mon);
     }
+    return 0;
 }
 
 static void pnv_chip_power9_pic_print_info(PnvChip *chip, Monitor *mon)
 {
     Pnv9Chip *chip9 = PNV9_CHIP(chip);
-    int i, j;
 
     pnv_xive_pic_print_info(&chip9->xive, mon);
     pnv_psi_pic_print_info(&chip9->psi, mon);
 
-    for (i = 0; i < PNV9_CHIP_MAX_PEC; i++) {
-        PnvPhb4PecState *pec = &chip9->pecs[i];
-        for (j = 0; j < pec->num_stacks; j++) {
-            pnv_phb4_pic_print_info(&pec->stacks[j].phb, mon);
-        }
-    }
+    object_child_foreach_recursive(OBJECT(chip),
+                         pnv_chip_power9_pic_print_info_child, mon);
 }
 
 static uint64_t pnv_chip_power8_xscom_core_base(PnvChip *chip,
@@ -692,12 +711,11 @@ static bool pnv_match_cpu(const char *default_type, const char *cpu_type)
 
 static void pnv_ipmi_bt_init(ISABus *bus, IPMIBmc *bmc, uint32_t irq)
 {
-    Object *obj;
+    ISADevice *dev = isa_new("isa-ipmi-bt");
 
-    obj = OBJECT(isa_create(bus, "isa-ipmi-bt"));
-    object_property_set_link(obj, OBJECT(bmc), "bmc", &error_fatal);
-    object_property_set_int(obj, irq, "irq", &error_fatal);
-    object_property_set_bool(obj, true, "realized", &error_fatal);
+    object_property_set_link(OBJECT(dev), "bmc", OBJECT(bmc), &error_fatal);
+    object_property_set_int(OBJECT(dev), "irq", irq, &error_fatal);
+    isa_realize_and_unref(dev, bus, &error_fatal);
 }
 
 static void pnv_chip_power10_pic_print_info(PnvChip *chip, Monitor *mon)
@@ -707,39 +725,63 @@ static void pnv_chip_power10_pic_print_info(PnvChip *chip, Monitor *mon)
     pnv_psi_pic_print_info(&chip10->psi, mon);
 }
 
+/* Always give the first 1GB to chip 0 else we won't boot */
+static uint64_t pnv_chip_get_ram_size(PnvMachineState *pnv, int chip_id)
+{
+    MachineState *machine = MACHINE(pnv);
+    uint64_t ram_per_chip;
+
+    assert(machine->ram_size >= 1 * GiB);
+
+    ram_per_chip = machine->ram_size / pnv->num_chips;
+    if (ram_per_chip >= 1 * GiB) {
+        return QEMU_ALIGN_DOWN(ram_per_chip, 1 * MiB);
+    }
+
+    assert(pnv->num_chips > 1);
+
+    ram_per_chip = (machine->ram_size - 1 * GiB) / (pnv->num_chips - 1);
+    return chip_id == 0 ? 1 * GiB : QEMU_ALIGN_DOWN(ram_per_chip, 1 * MiB);
+}
+
 static void pnv_init(MachineState *machine)
 {
+    const char *bios_name = machine->firmware ?: FW_FILE_NAME;
     PnvMachineState *pnv = PNV_MACHINE(machine);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
     char *fw_filename;
     long fw_size;
+    uint64_t chip_ram_start = 0;
     int i;
     char *chip_typename;
     DriveInfo *pnor = drive_get(IF_MTD, 0, 0);
     DeviceState *dev;
 
+    if (kvm_enabled()) {
+        error_report("The powernv machine does not work with KVM acceleration");
+        exit(EXIT_FAILURE);
+    }
+
     /* allocate RAM */
-    if (machine->ram_size < (1 * GiB)) {
-        warn_report("skiboot may not work with < 1GB of RAM");
+    if (machine->ram_size < mc->default_ram_size) {
+        char *sz = size_to_str(mc->default_ram_size);
+        error_report("Invalid RAM size, should be bigger than %s", sz);
+        g_free(sz);
+        exit(EXIT_FAILURE);
     }
     memory_region_add_subregion(get_system_memory(), 0, machine->ram);
 
     /*
      * Create our simple PNOR device
      */
-    dev = qdev_create(NULL, TYPE_PNV_PNOR);
+    dev = qdev_new(TYPE_PNV_PNOR);
     if (pnor) {
-        qdev_prop_set_drive(dev, "drive", blk_by_legacy_dinfo(pnor),
-                            &error_abort);
+        qdev_prop_set_drive(dev, "drive", blk_by_legacy_dinfo(pnor));
     }
-    qdev_init_nofail(dev);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     pnv->pnor = PNV_PNOR(dev);
 
     /* load skiboot firmware  */
-    if (bios_name == NULL) {
-        bios_name = FW_FILE_NAME;
-    }
-
     fw_filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
     if (!fw_filename) {
         error_report("Could not find OPAL firmware '%s'", bios_name);
@@ -807,48 +849,47 @@ static void pnv_init(MachineState *machine)
      * TODO: should we decide on how many chips we can create based
      * on #cores and Venice vs. Murano vs. Naples chip type etc...,
      */
-    if (!is_power_of_2(pnv->num_chips) || pnv->num_chips > 4) {
+    if (!is_power_of_2(pnv->num_chips) || pnv->num_chips > 16) {
         error_report("invalid number of chips: '%d'", pnv->num_chips);
-        error_printf("Try '-smp sockets=N'. Valid values are : 1, 2 or 4.\n");
+        error_printf(
+            "Try '-smp sockets=N'. Valid values are : 1, 2, 4, 8 and 16.\n");
         exit(1);
     }
 
     pnv->chips = g_new0(PnvChip *, pnv->num_chips);
     for (i = 0; i < pnv->num_chips; i++) {
         char chip_name[32];
-        Object *chip = object_new(chip_typename);
+        Object *chip = OBJECT(qdev_new(chip_typename));
+        uint64_t chip_ram_size =  pnv_chip_get_ram_size(pnv, i);
 
         pnv->chips[i] = PNV_CHIP(chip);
 
-        /*
-         * TODO: put all the memory in one node on chip 0 until we find a
-         * way to specify different ranges for each chip
-         */
-        if (i == 0) {
-            object_property_set_int(chip, machine->ram_size, "ram-size",
-                                    &error_fatal);
-        }
-
-        snprintf(chip_name, sizeof(chip_name), "chip[%d]", PNV_CHIP_HWID(i));
-        object_property_add_child(OBJECT(pnv), chip_name, chip, &error_fatal);
-        object_property_set_int(chip, PNV_CHIP_HWID(i), "chip-id",
+        /* Distribute RAM among the chips  */
+        object_property_set_int(chip, "ram-start", chip_ram_start,
                                 &error_fatal);
-        object_property_set_int(chip, machine->smp.cores,
-                                "nr-cores", &error_fatal);
-        object_property_set_int(chip, machine->smp.threads,
-                                "nr-threads", &error_fatal);
+        object_property_set_int(chip, "ram-size", chip_ram_size,
+                                &error_fatal);
+        chip_ram_start += chip_ram_size;
+
+        snprintf(chip_name, sizeof(chip_name), "chip[%d]", i);
+        object_property_add_child(OBJECT(pnv), chip_name, chip);
+        object_property_set_int(chip, "chip-id", i, &error_fatal);
+        object_property_set_int(chip, "nr-cores", machine->smp.cores,
+                                &error_fatal);
+        object_property_set_int(chip, "nr-threads", machine->smp.threads,
+                                &error_fatal);
         /*
          * The POWER8 machine use the XICS interrupt interface.
          * Propagate the XICS fabric to the chip and its controllers.
          */
         if (object_dynamic_cast(OBJECT(pnv), TYPE_XICS_FABRIC)) {
-            object_property_set_link(chip, OBJECT(pnv), "xics", &error_abort);
+            object_property_set_link(chip, "xics", OBJECT(pnv), &error_abort);
         }
         if (object_dynamic_cast(OBJECT(pnv), TYPE_XIVE_FABRIC)) {
-            object_property_set_link(chip, OBJECT(pnv), "xive-fabric",
+            object_property_set_link(chip, "xive-fabric", OBJECT(pnv),
                                      &error_abort);
         }
-        object_property_set_bool(chip, true, "realized", &error_fatal);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(chip), &error_fatal);
     }
     g_free(chip_typename);
 
@@ -869,6 +910,14 @@ static void pnv_init(MachineState *machine)
         pnv->bmc = pnv_bmc_create(pnv->pnor);
         pnv_ipmi_bt_init(pnv->isa_bus, pnv->bmc, 10);
     }
+
+    /*
+     * The PNOR is mapped on the LPC FW address space by the BMC.
+     * Since we can not reach the remote BMC machine with LPC memops,
+     * map it always for now.
+     */
+    memory_region_add_subregion(pnv->chips[0]->fw_mr, PNOR_SPI_OFFSET,
+                                &pnv->pnor->mmio);
 
     /*
      * OpenPOWER systems use a IPMI SEL Event message to notify the
@@ -1058,25 +1107,18 @@ static void pnv_chip_power8_instance_init(Object *obj)
     object_property_add_link(obj, "xics", TYPE_XICS_FABRIC,
                              (Object **)&chip8->xics,
                              object_property_allow_set_link,
-                             OBJ_PROP_LINK_STRONG,
-                             &error_abort);
+                             OBJ_PROP_LINK_STRONG);
 
-    object_initialize_child(obj, "psi",  &chip8->psi, sizeof(chip8->psi),
-                            TYPE_PNV8_PSI, &error_abort, NULL);
+    object_initialize_child(obj, "psi", &chip8->psi, TYPE_PNV8_PSI);
 
-    object_initialize_child(obj, "lpc",  &chip8->lpc, sizeof(chip8->lpc),
-                            TYPE_PNV8_LPC, &error_abort, NULL);
+    object_initialize_child(obj, "lpc", &chip8->lpc, TYPE_PNV8_LPC);
 
-    object_initialize_child(obj, "occ",  &chip8->occ, sizeof(chip8->occ),
-                            TYPE_PNV8_OCC, &error_abort, NULL);
+    object_initialize_child(obj, "occ", &chip8->occ, TYPE_PNV8_OCC);
 
-    object_initialize_child(obj, "homer",  &chip8->homer, sizeof(chip8->homer),
-                            TYPE_PNV8_HOMER, &error_abort, NULL);
+    object_initialize_child(obj, "homer", &chip8->homer, TYPE_PNV8_HOMER);
 
     for (i = 0; i < pcc->num_phbs; i++) {
-        object_initialize_child(obj, "phb[*]", &chip8->phbs[i],
-                                sizeof(chip8->phbs[i]), TYPE_PNV_PHB3,
-                                &error_abort, NULL);
+        object_initialize_child(obj, "phb[*]", &chip8->phbs[i], TYPE_PNV_PHB3);
     }
 
     /*
@@ -1140,25 +1182,23 @@ static void pnv_chip_power8_realize(DeviceState *dev, Error **errp)
     }
 
     /* Processor Service Interface (PSI) Host Bridge */
-    object_property_set_int(OBJECT(&chip8->psi), PNV_PSIHB_BASE(chip),
-                            "bar", &error_fatal);
-    object_property_set_link(OBJECT(&chip8->psi), OBJECT(chip8->xics),
-                             ICS_PROP_XICS, &error_abort);
-    object_property_set_bool(OBJECT(&chip8->psi), true, "realized", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    object_property_set_int(OBJECT(&chip8->psi), "bar", PNV_PSIHB_BASE(chip),
+                            &error_fatal);
+    object_property_set_link(OBJECT(&chip8->psi), ICS_PROP_XICS,
+                             OBJECT(chip8->xics), &error_abort);
+    if (!qdev_realize(DEVICE(&chip8->psi), NULL, errp)) {
         return;
     }
     pnv_xscom_add_subregion(chip, PNV_XSCOM_PSIHB_BASE,
                             &PNV_PSI(psi8)->xscom_regs);
 
     /* Create LPC controller */
-    object_property_set_link(OBJECT(&chip8->lpc), OBJECT(&chip8->psi), "psi",
+    object_property_set_link(OBJECT(&chip8->lpc), "psi", OBJECT(&chip8->psi),
                              &error_abort);
-    object_property_set_bool(OBJECT(&chip8->lpc), true, "realized",
-                             &error_fatal);
+    qdev_realize(DEVICE(&chip8->lpc), NULL, &error_fatal);
     pnv_xscom_add_subregion(chip, PNV_XSCOM_LPC_BASE, &chip8->lpc.xscom_regs);
 
+    chip->fw_mr = &chip8->lpc.isa_fw;
     chip->dt_isa_nodename = g_strdup_printf("/xscom@%" PRIx64 "/isa@%x",
                                             (uint64_t) PNV_XSCOM_BASE(chip),
                                             PNV_XSCOM_LPC_BASE);
@@ -1174,11 +1214,9 @@ static void pnv_chip_power8_realize(DeviceState *dev, Error **errp)
     }
 
     /* Create the simplified OCC model */
-    object_property_set_link(OBJECT(&chip8->occ), OBJECT(&chip8->psi), "psi",
+    object_property_set_link(OBJECT(&chip8->occ), "psi", OBJECT(&chip8->psi),
                              &error_abort);
-    object_property_set_bool(OBJECT(&chip8->occ), true, "realized", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!qdev_realize(DEVICE(&chip8->occ), NULL, errp)) {
         return;
     }
     pnv_xscom_add_subregion(chip, PNV_XSCOM_OCC_BASE, &chip8->occ.xscom_regs);
@@ -1188,12 +1226,9 @@ static void pnv_chip_power8_realize(DeviceState *dev, Error **errp)
                                 &chip8->occ.sram_regs);
 
     /* HOMER */
-    object_property_set_link(OBJECT(&chip8->homer), OBJECT(chip), "chip",
+    object_property_set_link(OBJECT(&chip8->homer), "chip", OBJECT(chip),
                              &error_abort);
-    object_property_set_bool(OBJECT(&chip8->homer), true, "realized",
-                             &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!qdev_realize(DEVICE(&chip8->homer), NULL, errp)) {
         return;
     }
     /* Homer Xscom region */
@@ -1206,28 +1241,15 @@ static void pnv_chip_power8_realize(DeviceState *dev, Error **errp)
     /* PHB3 controllers */
     for (i = 0; i < chip->num_phbs; i++) {
         PnvPHB3 *phb = &chip8->phbs[i];
-        PnvPBCQState *pbcq = &phb->pbcq;
 
-        object_property_set_int(OBJECT(phb), i, "index", &error_fatal);
-        object_property_set_int(OBJECT(phb), chip->chip_id, "chip-id",
+        object_property_set_int(OBJECT(phb), "index", i, &error_fatal);
+        object_property_set_int(OBJECT(phb), "chip-id", chip->chip_id,
                                 &error_fatal);
-        object_property_set_bool(OBJECT(phb), true, "realized", &local_err);
-        if (local_err) {
-            error_propagate(errp, local_err);
+        object_property_set_link(OBJECT(phb), "chip", OBJECT(chip),
+                                 &error_fatal);
+        if (!sysbus_realize(SYS_BUS_DEVICE(phb), errp)) {
             return;
         }
-        qdev_set_parent_bus(DEVICE(phb), sysbus_get_default());
-
-        /* Populate the XSCOM address space. */
-        pnv_xscom_add_subregion(chip,
-                                PNV_XSCOM_PBCQ_NEST_BASE + 0x400 * phb->phb_id,
-                                &pbcq->xscom_nest_regs);
-        pnv_xscom_add_subregion(chip,
-                                PNV_XSCOM_PBCQ_PCI_BASE + 0x400 * phb->phb_id,
-                                &pbcq->xscom_pci_regs);
-        pnv_xscom_add_subregion(chip,
-                                PNV_XSCOM_PBCQ_SPCI_BASE + 0x040 * phb->phb_id,
-                                &pbcq->xscom_spci_regs);
     }
 }
 
@@ -1316,33 +1338,25 @@ static void pnv_chip_power9_instance_init(Object *obj)
     PnvChipClass *pcc = PNV_CHIP_GET_CLASS(obj);
     int i;
 
-    object_initialize_child(obj, "xive", &chip9->xive, sizeof(chip9->xive),
-                            TYPE_PNV_XIVE, &error_abort, NULL);
+    object_initialize_child(obj, "xive", &chip9->xive, TYPE_PNV_XIVE);
     object_property_add_alias(obj, "xive-fabric", OBJECT(&chip9->xive),
-                              "xive-fabric", &error_abort);
+                              "xive-fabric");
 
-    object_initialize_child(obj, "psi",  &chip9->psi, sizeof(chip9->psi),
-                            TYPE_PNV9_PSI, &error_abort, NULL);
+    object_initialize_child(obj, "psi", &chip9->psi, TYPE_PNV9_PSI);
 
-    object_initialize_child(obj, "lpc",  &chip9->lpc, sizeof(chip9->lpc),
-                            TYPE_PNV9_LPC, &error_abort, NULL);
+    object_initialize_child(obj, "lpc", &chip9->lpc, TYPE_PNV9_LPC);
 
-    object_initialize_child(obj, "occ",  &chip9->occ, sizeof(chip9->occ),
-                            TYPE_PNV9_OCC, &error_abort, NULL);
+    object_initialize_child(obj, "occ", &chip9->occ, TYPE_PNV9_OCC);
 
-    object_initialize_child(obj, "homer",  &chip9->homer, sizeof(chip9->homer),
-                            TYPE_PNV9_HOMER, &error_abort, NULL);
+    object_initialize_child(obj, "homer", &chip9->homer, TYPE_PNV9_HOMER);
 
-    for (i = 0; i < PNV9_CHIP_MAX_PEC; i++) {
+    /* Number of PECs is the chip default */
+    chip->num_pecs = pcc->num_pecs;
+
+    for (i = 0; i < chip->num_pecs; i++) {
         object_initialize_child(obj, "pec[*]", &chip9->pecs[i],
-                                sizeof(chip9->pecs[i]), TYPE_PNV_PHB4_PEC,
-                                &error_abort, NULL);
+                                TYPE_PNV_PHB4_PEC);
     }
-
-    /*
-     * Number of PHBs is the chip default
-     */
-    chip->num_phbs = pcc->num_phbs;
 }
 
 static void pnv_chip_quad_realize(Pnv9Chip *chip9, Error **errp)
@@ -1360,45 +1374,35 @@ static void pnv_chip_quad_realize(Pnv9Chip *chip9, Error **errp)
         int core_id = CPU_CORE(pnv_core)->core_id;
 
         snprintf(eq_name, sizeof(eq_name), "eq[%d]", core_id);
-        object_initialize_child(OBJECT(chip), eq_name, eq, sizeof(*eq),
-                                TYPE_PNV_QUAD, &error_fatal, NULL);
+        object_initialize_child_with_props(OBJECT(chip), eq_name, eq,
+                                           sizeof(*eq), TYPE_PNV_QUAD,
+                                           &error_fatal, NULL);
 
-        object_property_set_int(OBJECT(eq), core_id, "id", &error_fatal);
-        object_property_set_bool(OBJECT(eq), true, "realized", &error_fatal);
+        object_property_set_int(OBJECT(eq), "quad-id", core_id, &error_fatal);
+        qdev_realize(DEVICE(eq), NULL, &error_fatal);
 
-        pnv_xscom_add_subregion(chip, PNV9_XSCOM_EQ_BASE(eq->id),
+        pnv_xscom_add_subregion(chip, PNV9_XSCOM_EQ_BASE(eq->quad_id),
                                 &eq->xscom_regs);
     }
 }
 
-static void pnv_chip_power9_phb_realize(PnvChip *chip, Error **errp)
+static void pnv_chip_power9_pec_realize(PnvChip *chip, Error **errp)
 {
     Pnv9Chip *chip9 = PNV9_CHIP(chip);
-    Error *local_err = NULL;
-    int i, j;
-    int phb_id = 0;
+    int i;
 
-    for (i = 0; i < PNV9_CHIP_MAX_PEC; i++) {
+    for (i = 0; i < chip->num_pecs; i++) {
         PnvPhb4PecState *pec = &chip9->pecs[i];
         PnvPhb4PecClass *pecc = PNV_PHB4_PEC_GET_CLASS(pec);
         uint32_t pec_nest_base;
         uint32_t pec_pci_base;
 
-        object_property_set_int(OBJECT(pec), i, "index", &error_fatal);
-        /*
-         * PEC0 -> 1 stack
-         * PEC1 -> 2 stacks
-         * PEC2 -> 3 stacks
-         */
-        object_property_set_int(OBJECT(pec), i + 1, "num-stacks",
+        object_property_set_int(OBJECT(pec), "index", i, &error_fatal);
+        object_property_set_int(OBJECT(pec), "chip-id", chip->chip_id,
                                 &error_fatal);
-        object_property_set_int(OBJECT(pec), chip->chip_id, "chip-id",
+        object_property_set_link(OBJECT(pec), "chip", OBJECT(chip),
                                  &error_fatal);
-        object_property_set_link(OBJECT(pec), OBJECT(get_system_memory()),
-                                 "system-memory", &error_abort);
-        object_property_set_bool(OBJECT(pec), true, "realized", &local_err);
-        if (local_err) {
-            error_propagate(errp, local_err);
+        if (!qdev_realize(DEVICE(pec), NULL, errp)) {
             return;
         }
 
@@ -1407,39 +1411,6 @@ static void pnv_chip_power9_phb_realize(PnvChip *chip, Error **errp)
 
         pnv_xscom_add_subregion(chip, pec_nest_base, &pec->nest_regs_mr);
         pnv_xscom_add_subregion(chip, pec_pci_base, &pec->pci_regs_mr);
-
-        for (j = 0; j < pec->num_stacks && phb_id < chip->num_phbs;
-             j++, phb_id++) {
-            PnvPhb4PecStack *stack = &pec->stacks[j];
-            Object *obj = OBJECT(&stack->phb);
-
-            object_property_set_int(obj, phb_id, "index", &error_fatal);
-            object_property_set_int(obj, chip->chip_id, "chip-id",
-                                    &error_fatal);
-            object_property_set_int(obj, PNV_PHB4_VERSION, "version",
-                                    &error_fatal);
-            object_property_set_int(obj, PNV_PHB4_DEVICE_ID, "device-id",
-                                    &error_fatal);
-            object_property_set_link(obj, OBJECT(stack), "stack", &error_abort);
-            object_property_set_bool(obj, true, "realized", &local_err);
-            if (local_err) {
-                error_propagate(errp, local_err);
-                return;
-            }
-            qdev_set_parent_bus(DEVICE(obj), sysbus_get_default());
-
-            /* Populate the XSCOM address space. */
-            pnv_xscom_add_subregion(chip,
-                                   pec_nest_base + 0x40 * (stack->stack_no + 1),
-                                   &stack->nest_regs_mr);
-            pnv_xscom_add_subregion(chip,
-                                    pec_pci_base + 0x40 * (stack->stack_no + 1),
-                                    &stack->pci_regs_mr);
-            pnv_xscom_add_subregion(chip,
-                                    pec_pci_base + PNV9_XSCOM_PEC_PCI_STK0 +
-                                    0x40 * stack->stack_no,
-                                    &stack->phb_regs_mr);
-        }
     }
 }
 
@@ -1472,56 +1443,48 @@ static void pnv_chip_power9_realize(DeviceState *dev, Error **errp)
     }
 
     /* XIVE interrupt controller (POWER9) */
-    object_property_set_int(OBJECT(&chip9->xive), PNV9_XIVE_IC_BASE(chip),
-                            "ic-bar", &error_fatal);
-    object_property_set_int(OBJECT(&chip9->xive), PNV9_XIVE_VC_BASE(chip),
-                            "vc-bar", &error_fatal);
-    object_property_set_int(OBJECT(&chip9->xive), PNV9_XIVE_PC_BASE(chip),
-                            "pc-bar", &error_fatal);
-    object_property_set_int(OBJECT(&chip9->xive), PNV9_XIVE_TM_BASE(chip),
-                            "tm-bar", &error_fatal);
-    object_property_set_link(OBJECT(&chip9->xive), OBJECT(chip), "chip",
+    object_property_set_int(OBJECT(&chip9->xive), "ic-bar",
+                            PNV9_XIVE_IC_BASE(chip), &error_fatal);
+    object_property_set_int(OBJECT(&chip9->xive), "vc-bar",
+                            PNV9_XIVE_VC_BASE(chip), &error_fatal);
+    object_property_set_int(OBJECT(&chip9->xive), "pc-bar",
+                            PNV9_XIVE_PC_BASE(chip), &error_fatal);
+    object_property_set_int(OBJECT(&chip9->xive), "tm-bar",
+                            PNV9_XIVE_TM_BASE(chip), &error_fatal);
+    object_property_set_link(OBJECT(&chip9->xive), "chip", OBJECT(chip),
                              &error_abort);
-    object_property_set_bool(OBJECT(&chip9->xive), true, "realized",
-                             &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!sysbus_realize(SYS_BUS_DEVICE(&chip9->xive), errp)) {
         return;
     }
     pnv_xscom_add_subregion(chip, PNV9_XSCOM_XIVE_BASE,
                             &chip9->xive.xscom_regs);
 
     /* Processor Service Interface (PSI) Host Bridge */
-    object_property_set_int(OBJECT(&chip9->psi), PNV9_PSIHB_BASE(chip),
-                            "bar", &error_fatal);
-    object_property_set_bool(OBJECT(&chip9->psi), true, "realized", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    object_property_set_int(OBJECT(&chip9->psi), "bar", PNV9_PSIHB_BASE(chip),
+                            &error_fatal);
+    if (!qdev_realize(DEVICE(&chip9->psi), NULL, errp)) {
         return;
     }
     pnv_xscom_add_subregion(chip, PNV9_XSCOM_PSIHB_BASE,
                             &PNV_PSI(psi9)->xscom_regs);
 
     /* LPC */
-    object_property_set_link(OBJECT(&chip9->lpc), OBJECT(&chip9->psi), "psi",
+    object_property_set_link(OBJECT(&chip9->lpc), "psi", OBJECT(&chip9->psi),
                              &error_abort);
-    object_property_set_bool(OBJECT(&chip9->lpc), true, "realized", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!qdev_realize(DEVICE(&chip9->lpc), NULL, errp)) {
         return;
     }
     memory_region_add_subregion(get_system_memory(), PNV9_LPCM_BASE(chip),
                                 &chip9->lpc.xscom_regs);
 
+    chip->fw_mr = &chip9->lpc.isa_fw;
     chip->dt_isa_nodename = g_strdup_printf("/lpcm-opb@%" PRIx64 "/lpc@0",
                                             (uint64_t) PNV9_LPCM_BASE(chip));
 
     /* Create the simplified OCC model */
-    object_property_set_link(OBJECT(&chip9->occ), OBJECT(&chip9->psi), "psi",
+    object_property_set_link(OBJECT(&chip9->occ), "psi", OBJECT(&chip9->psi),
                              &error_abort);
-    object_property_set_bool(OBJECT(&chip9->occ), true, "realized", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!qdev_realize(DEVICE(&chip9->occ), NULL, errp)) {
         return;
     }
     pnv_xscom_add_subregion(chip, PNV9_XSCOM_OCC_BASE, &chip9->occ.xscom_regs);
@@ -1531,12 +1494,9 @@ static void pnv_chip_power9_realize(DeviceState *dev, Error **errp)
                                 &chip9->occ.sram_regs);
 
     /* HOMER */
-    object_property_set_link(OBJECT(&chip9->homer), OBJECT(chip), "chip",
+    object_property_set_link(OBJECT(&chip9->homer), "chip", OBJECT(chip),
                              &error_abort);
-    object_property_set_bool(OBJECT(&chip9->homer), true, "realized",
-                             &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!qdev_realize(DEVICE(&chip9->homer), NULL, errp)) {
         return;
     }
     /* Homer Xscom region */
@@ -1546,8 +1506,8 @@ static void pnv_chip_power9_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(get_system_memory(), PNV9_HOMER_BASE(chip),
                                 &chip9->homer.regs);
 
-    /* PHBs */
-    pnv_chip_power9_phb_realize(chip, &local_err);
+    /* PEC PHBs */
+    pnv_chip_power9_pec_realize(chip, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         return;
@@ -1578,7 +1538,7 @@ static void pnv_chip_power9_class_init(ObjectClass *klass, void *data)
     k->xscom_core_base = pnv_chip_power9_xscom_core_base;
     k->xscom_pcba = pnv_chip_power9_xscom_pcba;
     dc->desc = "PowerNV Chip POWER9";
-    k->num_phbs = 6;
+    k->num_pecs = PNV9_CHIP_MAX_PEC;
 
     device_class_set_parent_realize(dc, pnv_chip_power9_realize,
                                     &k->parent_realize);
@@ -1588,10 +1548,8 @@ static void pnv_chip_power10_instance_init(Object *obj)
 {
     Pnv10Chip *chip10 = PNV10_CHIP(obj);
 
-    object_initialize_child(obj, "psi",  &chip10->psi, sizeof(chip10->psi),
-                            TYPE_PNV10_PSI, &error_abort, NULL);
-    object_initialize_child(obj, "lpc",  &chip10->lpc, sizeof(chip10->lpc),
-                            TYPE_PNV10_LPC, &error_abort, NULL);
+    object_initialize_child(obj, "psi", &chip10->psi, TYPE_PNV10_PSI);
+    object_initialize_child(obj, "lpc", &chip10->lpc, TYPE_PNV10_LPC);
 }
 
 static void pnv_chip_power10_realize(DeviceState *dev, Error **errp)
@@ -1616,29 +1574,24 @@ static void pnv_chip_power10_realize(DeviceState *dev, Error **errp)
     }
 
     /* Processor Service Interface (PSI) Host Bridge */
-    object_property_set_int(OBJECT(&chip10->psi), PNV10_PSIHB_BASE(chip),
-                            "bar", &error_fatal);
-    object_property_set_bool(OBJECT(&chip10->psi), true, "realized",
-                             &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    object_property_set_int(OBJECT(&chip10->psi), "bar",
+                            PNV10_PSIHB_BASE(chip), &error_fatal);
+    if (!qdev_realize(DEVICE(&chip10->psi), NULL, errp)) {
         return;
     }
     pnv_xscom_add_subregion(chip, PNV10_XSCOM_PSIHB_BASE,
                             &PNV_PSI(&chip10->psi)->xscom_regs);
 
     /* LPC */
-    object_property_set_link(OBJECT(&chip10->lpc), OBJECT(&chip10->psi), "psi",
-                             &error_abort);
-    object_property_set_bool(OBJECT(&chip10->lpc), true, "realized",
-                             &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    object_property_set_link(OBJECT(&chip10->lpc), "psi",
+                             OBJECT(&chip10->psi), &error_abort);
+    if (!qdev_realize(DEVICE(&chip10->lpc), NULL, errp)) {
         return;
     }
     memory_region_add_subregion(get_system_memory(), PNV10_LPCM_BASE(chip),
                                 &chip10->lpc.xscom_regs);
 
+    chip->fw_mr = &chip10->lpc.isa_fw;
     chip->dt_isa_nodename = g_strdup_printf("/lpcm-opb@%" PRIx64 "/lpc@0",
                                             (uint64_t) PNV10_LPCM_BASE(chip));
 }
@@ -1737,22 +1690,19 @@ static void pnv_chip_core_realize(PnvChip *chip, Error **errp)
         pnv_core = PNV_CORE(object_new(typename));
 
         snprintf(core_name, sizeof(core_name), "core[%d]", core_hwid);
-        object_property_add_child(OBJECT(chip), core_name, OBJECT(pnv_core),
-                                  &error_abort);
+        object_property_add_child(OBJECT(chip), core_name, OBJECT(pnv_core));
         chip->cores[i] = pnv_core;
-        object_property_set_int(OBJECT(pnv_core), chip->nr_threads,
-                                "nr-threads", &error_fatal);
-        object_property_set_int(OBJECT(pnv_core), core_hwid,
-                                CPU_CORE_PROP_CORE_ID, &error_fatal);
-        object_property_set_int(OBJECT(pnv_core),
-                                pcc->core_pir(chip, core_hwid),
-                                "pir", &error_fatal);
-        object_property_set_int(OBJECT(pnv_core), pnv->fw_load_addr,
-                                "hrmor", &error_fatal);
-        object_property_set_link(OBJECT(pnv_core), OBJECT(chip), "chip",
+        object_property_set_int(OBJECT(pnv_core), "nr-threads",
+                                chip->nr_threads, &error_fatal);
+        object_property_set_int(OBJECT(pnv_core), CPU_CORE_PROP_CORE_ID,
+                                core_hwid, &error_fatal);
+        object_property_set_int(OBJECT(pnv_core), "pir",
+                                pcc->core_pir(chip, core_hwid), &error_fatal);
+        object_property_set_int(OBJECT(pnv_core), "hrmor", pnv->fw_load_addr,
+                                &error_fatal);
+        object_property_set_link(OBJECT(pnv_core), "chip", OBJECT(chip),
                                  &error_abort);
-        object_property_set_bool(OBJECT(pnv_core), true, "realized",
-                                 &error_fatal);
+        qdev_realize(DEVICE(pnv_core), NULL, &error_fatal);
 
         /* Each core has an XSCOM MMIO region */
         xscom_core_base = pcc->xscom_core_base(chip, core_hwid);
@@ -1783,7 +1733,6 @@ static Property pnv_chip_properties[] = {
     DEFINE_PROP_UINT32("nr-cores", PnvChip, nr_cores, 1),
     DEFINE_PROP_UINT64("cores-mask", PnvChip, cores_mask, 0x0),
     DEFINE_PROP_UINT32("nr-threads", PnvChip, nr_threads, 1),
-    DEFINE_PROP_UINT32("num-phbs", PnvChip, num_phbs, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -1814,10 +1763,32 @@ PowerPCCPU *pnv_chip_find_cpu(PnvChip *chip, uint32_t pir)
     return NULL;
 }
 
+typedef struct ForeachPhb3Args {
+    int irq;
+    ICSState *ics;
+} ForeachPhb3Args;
+
+static int pnv_ics_get_child(Object *child, void *opaque)
+{
+    ForeachPhb3Args *args = opaque;
+    PnvPHB3 *phb3 = (PnvPHB3 *) object_dynamic_cast(child, TYPE_PNV_PHB3);
+
+    if (phb3) {
+        if (ics_valid_irq(&phb3->lsis, args->irq)) {
+            args->ics = &phb3->lsis;
+        }
+        if (ics_valid_irq(ICS(&phb3->msis), args->irq)) {
+            args->ics = ICS(&phb3->msis);
+        }
+    }
+    return args->ics ? 1 : 0;
+}
+
 static ICSState *pnv_ics_get(XICSFabric *xi, int irq)
 {
     PnvMachineState *pnv = PNV_MACHINE(xi);
-    int i, j;
+    ForeachPhb3Args args = { irq, NULL };
+    int i;
 
     for (i = 0; i < pnv->num_chips; i++) {
         PnvChip *chip = pnv->chips[i];
@@ -1826,32 +1797,37 @@ static ICSState *pnv_ics_get(XICSFabric *xi, int irq)
         if (ics_valid_irq(&chip8->psi.ics, irq)) {
             return &chip8->psi.ics;
         }
-        for (j = 0; j < chip->num_phbs; j++) {
-            if (ics_valid_irq(&chip8->phbs[j].lsis, irq)) {
-                return &chip8->phbs[j].lsis;
-            }
-            if (ics_valid_irq(ICS(&chip8->phbs[j].msis), irq)) {
-                return ICS(&chip8->phbs[j].msis);
-            }
+
+        object_child_foreach(OBJECT(chip), pnv_ics_get_child, &args);
+        if (args.ics) {
+            return args.ics;
         }
     }
     return NULL;
 }
 
+static int pnv_ics_resend_child(Object *child, void *opaque)
+{
+    PnvPHB3 *phb3 = (PnvPHB3 *) object_dynamic_cast(child, TYPE_PNV_PHB3);
+
+    if (phb3) {
+        ics_resend(&phb3->lsis);
+        ics_resend(ICS(&phb3->msis));
+    }
+    return 0;
+}
+
 static void pnv_ics_resend(XICSFabric *xi)
 {
     PnvMachineState *pnv = PNV_MACHINE(xi);
-    int i, j;
+    int i;
 
     for (i = 0; i < pnv->num_chips; i++) {
         PnvChip *chip = pnv->chips[i];
         Pnv8Chip *chip8 = PNV8_CHIP(pnv->chips[i]);
 
         ics_resend(&chip8->psi.ics);
-        for (j = 0; j < chip->num_phbs; j++) {
-            ics_resend(&chip8->phbs[j].lsis);
-            ics_resend(ICS(&chip8->phbs[j].msis));
-        }
+        object_child_foreach(OBJECT(chip), pnv_ics_resend_child, NULL);
     }
 }
 
@@ -1954,7 +1930,7 @@ static void pnv_machine_power10_class_init(ObjectClass *oc, void *data)
     static const char compat[] = "qemu,powernv10\0ibm,powernv";
 
     mc->desc = "IBM PowerNV (Non-Virtualized) POWER10";
-    mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("power10_v1.0");
+    mc->default_cpu_type = POWERPC_CPU_TYPE_NAME("power10_v2.0");
 
     pmc->compat = compat;
     pmc->compat_size = sizeof(compat);
@@ -1977,10 +1953,49 @@ static void pnv_machine_set_hb(Object *obj, bool value, Error **errp)
     }
 }
 
+static void pnv_cpu_do_nmi_on_cpu(CPUState *cs, run_on_cpu_data arg)
+{
+    PowerPCCPU *cpu = POWERPC_CPU(cs);
+    CPUPPCState *env = &cpu->env;
+
+    cpu_synchronize_state(cs);
+    ppc_cpu_do_system_reset(cs);
+    if (env->spr[SPR_SRR1] & SRR1_WAKESTATE) {
+        /*
+         * Power-save wakeups, as indicated by non-zero SRR1[46:47] put the
+         * wakeup reason in SRR1[42:45], system reset is indicated with 0b0100
+         * (PPC_BIT(43)).
+         */
+        if (!(env->spr[SPR_SRR1] & SRR1_WAKERESET)) {
+            warn_report("ppc_cpu_do_system_reset does not set system reset wakeup reason");
+            env->spr[SPR_SRR1] |= SRR1_WAKERESET;
+        }
+    } else {
+        /*
+         * For non-powersave system resets, SRR1[42:45] are defined to be
+         * implementation-dependent. The POWER9 User Manual specifies that
+         * an external (SCOM driven, which may come from a BMC nmi command or
+         * another CPU requesting a NMI IPI) system reset exception should be
+         * 0b0010 (PPC_BIT(44)).
+         */
+        env->spr[SPR_SRR1] |= SRR1_WAKESCOM;
+    }
+}
+
+static void pnv_nmi(NMIState *n, int cpu_index, Error **errp)
+{
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        async_run_on_cpu(cs, pnv_cpu_do_nmi_on_cpu, RUN_ON_CPU_NULL);
+    }
+}
+
 static void pnv_machine_class_init(ObjectClass *oc, void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
     InterruptStatsProviderClass *ispc = INTERRUPT_STATS_PROVIDER_CLASS(oc);
+    NMIClass *nc = NMI_CLASS(oc);
 
     mc->desc = "IBM PowerNV (Non-Virtualized)";
     mc->init = pnv_init;
@@ -1994,16 +2009,15 @@ static void pnv_machine_class_init(ObjectClass *oc, void *data)
      * RAM defaults to less than 2048 for 32-bit hosts, and large
      * enough to fit the maximum initrd size at it's load address
      */
-    mc->default_ram_size = INITRD_LOAD_ADDR + INITRD_MAX_SIZE;
+    mc->default_ram_size = 1 * GiB;
     mc->default_ram_id = "pnv.ram";
     ispc->print_info = pnv_pic_print_info;
+    nc->nmi_monitor_handler = pnv_nmi;
 
     object_class_property_add_bool(oc, "hb-mode",
-                                   pnv_machine_get_hb, pnv_machine_set_hb,
-                                   &error_abort);
+                                   pnv_machine_get_hb, pnv_machine_set_hb);
     object_class_property_set_description(oc, "hb-mode",
-                              "Use a hostboot like boot loader",
-                              NULL);
+                              "Use a hostboot like boot loader");
 }
 
 #define DEFINE_PNV8_CHIP_TYPE(type, class_initfn) \
@@ -2060,6 +2074,7 @@ static const TypeInfo types[] = {
         .class_size    = sizeof(PnvMachineClass),
         .interfaces = (InterfaceInfo[]) {
             { TYPE_INTERRUPT_STATS_PROVIDER },
+            { TYPE_NMI },
             { },
         },
     },

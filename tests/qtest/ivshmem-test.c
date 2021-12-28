@@ -13,7 +13,7 @@
 #include "contrib/ivshmem-server/ivshmem-server.h"
 #include "libqos/libqos-pc.h"
 #include "libqos/libqos-spapr.h"
-#include "libqtest.h"
+#include "libqos/libqtest.h"
 #include "qemu-common.h"
 
 #define TMPSHMSIZE (1 << 20)
@@ -135,7 +135,7 @@ static void setup_vm_cmd(IVState *s, const char *cmd, bool msix)
 static void setup_vm(IVState *s)
 {
     char *cmd = g_strdup_printf("-object memory-backend-file"
-                                ",id=mb1,size=1M,share,mem-path=/dev/shm%s"
+                                ",id=mb1,size=1M,share=on,mem-path=/dev/shm%s"
                                 " -device ivshmem-plain,memdev=mb1", tmpshm);
 
     setup_vm_cmd(s, cmd, false);
@@ -463,7 +463,6 @@ static gchar *mktempshm(int size, int *fd)
 int main(int argc, char **argv)
 {
     int ret, fd;
-    const char *arch = qtest_get_arch();
     gchar dir[] = "/tmp/ivshmem-test.XXXXXX";
 
     g_test_init(&argc, &argv, NULL);
@@ -488,9 +487,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ivshmem/memdev", test_ivshmem_memdev);
     if (g_test_slow()) {
         qtest_add_func("/ivshmem/pair", test_ivshmem_pair);
-        if (strcmp(arch, "ppc64") != 0) {
-            qtest_add_func("/ivshmem/server", test_ivshmem_server);
-        }
+        qtest_add_func("/ivshmem/server", test_ivshmem_server);
     }
 
 out:
