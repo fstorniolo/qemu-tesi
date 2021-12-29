@@ -342,6 +342,8 @@ static void newdev_io_write(void *opaque, hwaddr addr, uint64_t val, unsigned si
     switch(addr){
         case NEWDEV_REG_RAISE_IRQ:
             newdev_raise_irq(newdev, val);
+            //TO DO Serve il break?
+            break;
         case NEWDEV_REG_LOWER_IRQ:
             newdev_lower_irq(newdev, val);
             break;

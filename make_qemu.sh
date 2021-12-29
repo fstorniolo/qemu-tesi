@@ -1,6 +1,6 @@
 #!/bin/bash
 
 cd build
-make all -j 9 CONFIG_NEWDEV=y
+make -j $(nproc)
 sudo make install
 cd ..
