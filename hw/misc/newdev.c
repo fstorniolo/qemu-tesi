@@ -69,6 +69,7 @@ static const char *regnames[] = {
     "LOWER_IRQ",
 };
 
+static NewdevState *newdev_p;
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val);
 static void connected_handle_read(void *opaque);
 int map_hyperthread(cpu_set_t* set);
@@ -130,7 +131,6 @@ static void accept_handle_read(void *opaque){
 
 static void connected_handle_read(void *opaque){
     NewdevState *newdev = opaque;
-    // char buf[50];
     int len = 0;
     struct bpf_injection_msg_header* myheader;
 
@@ -267,6 +267,18 @@ static void connected_handle_read(void *opaque){
             {                            
                 newdev->hyperthreading_remapping = !newdev->hyperthreading_remapping;
                 DBG("HT_REMAPPING: %d", newdev->hyperthreading_remapping);
+                break;
+            }
+        case FIRST_ROUND_MIGRATION:
+            {
+                DBG("FIRST_ROUND_MIGRATION \n");
+                
+                qemu_mutex_lock(&newdev->thr_mutex_migration);
+                newdev->ready_to_migration = true;
+                qemu_mutex_unlock(&newdev->thr_mutex_migration);
+
+                DBG("Payload: %d",*(int*) (newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)));
+                break;
             }
         default:
             //unexpected value is threated like an error 
@@ -383,10 +395,8 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
     NewdevState *newdev = opaque;
     unsigned int index;
 
-
     addr = addr & NEWDEV_BUF_MASK;
     index = addr >> 2;
-
 
     DBG("INSIDE BUFMMIO WRITE");
     DBG("Addr: %ld, Index: %d", addr, index);
@@ -503,6 +513,16 @@ static const MemoryRegionOps newdev_bufmmio_ops = {
 
 };
 
+NewdevState *get_newdev_state(void){
+    assert(newdev_p);
+    return newdev_p;
+}
+
+bool get_ready_to_migration(void){
+    NewdevState* new_dev_state = get_newdev_state();
+    return new_dev_state->ready_to_migration;
+}
+
 static int make_socket (uint16_t port){
   int sock;
   struct sockaddr_in name;
@@ -531,7 +551,7 @@ static int make_socket (uint16_t port){
 static void
 newdev_memli_begin(MemoryListener *listener)
 {
-    DBG("Inside newdev_memli_begin");
+    // DBG("Inside newdev_memli_begin");
     NewdevState *s = container_of(listener, NewdevState, memory_listener);
 
     s->num_trans_entries_tmp = 0;
@@ -542,7 +562,7 @@ static void
 newdev_memli_region_add(MemoryListener *listener,
                        MemoryRegionSection *section)
 {
-    DBG("Inside newdev_memli_region_add");
+    // DBG("Inside newdev_memli_region_add");
     NewdevState *s = container_of(listener, NewdevState, memory_listener);
     uint64_t size = int128_get64(section->size);
     uint64_t gpa_start = section->offset_within_address_space;
@@ -590,7 +610,7 @@ newdev_memli_region_add(MemoryListener *listener,
 static void
 newdev_memli_commit(MemoryListener *listener)
 {
-    DBG("Inside newdev_memli_commit");
+    // DBG("Inside newdev_memli_commit");
     NewdevState *s = container_of(listener, NewdevState, memory_listener);
     NewdevTranslateEntry *old_trans_entries;
     int num_old_trans_entries;
@@ -660,6 +680,9 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     qemu_mutex_init(&newdev->thr_mutex);
     qemu_cond_init(&newdev->thr_cond);
 
+    qemu_mutex_init(&newdev->thr_mutex_migration);
+    qemu_cond_init(&newdev->thr_cond_migration);
+
     /* Init I/O mapped memory region, exposing newdev registers. */
     memory_region_init_io(&newdev->regs, OBJECT(newdev), &newdev_io_ops, newdev,
                     "newdev-regs", NEWDEV_REG_MASK + 1);
@@ -703,7 +726,7 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     newdev->memory_listener.region_nop = newdev_memli_region_add,
     memory_listener_register(&newdev->memory_listener, &address_space_memory);
     
-    
+    newdev->ready_to_migration = false;
     DBG("qemu listen_fd added");
 
 
@@ -723,6 +746,9 @@ static void newdev_uninit(PCIDevice *pdev)
 
     qemu_cond_destroy(&newdev->thr_cond);
     qemu_mutex_destroy(&newdev->thr_mutex);
+
+    qemu_cond_destroy(&newdev->thr_cond_migration);
+    qemu_mutex_destroy(&newdev->thr_mutex_migration);
 
     msi_uninit(pdev);
 
@@ -752,7 +778,8 @@ static void newdev_class_init(ObjectClass *class, void *data)
 }
 
 static void newdev_instance_init(Object *obj){    
- 	return;
+    newdev_p = NEWDEV(obj);
+    return;
 }
 
 static void newdev_register_types(void)

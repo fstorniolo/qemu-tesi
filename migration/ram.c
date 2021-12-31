@@ -55,12 +55,23 @@
 #include "qemu/iov.h"
 #include "multifd.h"
 #include "sysemu/runstate.h"
+#include "hw/misc/newdev.h"
 
 #include "hw/boards.h" /* for machine_dump_guest_core() */
 
 #if defined(__linux__)
 #include "qemu/userfaultfd.h"
 #endif /* defined(__linux__) */
+
+#define RAM_MIGRATION_DEBUG 1
+
+#if RAM_MIGRATION_DEBUG > 0
+#define DBG(fmt, ...) do { \
+        fprintf(stderr, "ram-migration: " fmt "\n", ## __VA_ARGS__); \
+    } while (0)
+#else
+#define DBG(fmt, ...) do {} while (0)
+#endif
 
 /***********************************************************/
 /* ram save/restore */
@@ -2922,6 +2933,7 @@ static void ram_state_resume_prepare(RAMState *rs, QEMUFile *out)
  */
 void qemu_guest_free_page_hint(void *addr, size_t len)
 {
+    DBG("ram-migration: addr: %p len: %lu \n", addr, len);
     RAMBlock *block;
     ram_addr_t offset;
     size_t used_len, start, npages;
@@ -2985,6 +2997,13 @@ void qemu_guest_free_page_hint(void *addr, size_t len)
  */
 static int ram_save_setup(QEMUFile *f, void *opaque)
 {
+    DBG("RAM SAVE SETUP \n");
+
+    if(get_ready_to_migration())
+        DBG("get_ready_to_migration TRUE");
+    else
+        DBG("get_ready_to_migration FALSE");
+
     RAMState **rsp = opaque;
     RAMBlock *block;
 

@@ -61,6 +61,18 @@
 #include "sysemu/cpus.h"
 #include "yank_functions.h"
 #include "sysemu/qtest.h"
+#include "hw/misc/newdev.h"
+
+#define MIGRATION_DEBUG 1
+
+#if MIGRATION_DEBUG > 0
+#define DBG(fmt, ...) do { \
+        fprintf(stderr, "migration: " fmt "\n", ## __VA_ARGS__); \
+    } while (0)
+#else
+#define DBG(fmt, ...) do {} while (0)
+#endif
+
 
 #define MAX_THROTTLE  (128 << 20)      /* Migration transfer speed throttling */
 
@@ -3786,6 +3798,7 @@ static void qemu_savevm_wait_unplug(MigrationState *s, int old_state,
  */
 static void *migration_thread(void *opaque)
 {
+    DBG("Migration Thread \n");
     MigrationState *s = opaque;
     int64_t setup_start = qemu_clock_get_ms(QEMU_CLOCK_HOST);
     MigThrError thr_error;

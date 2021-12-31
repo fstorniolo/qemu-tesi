@@ -1,6 +1,9 @@
 #ifndef NEWDEV_H
 #define NEWDEV_H
 #endif
+
+#include "hw/pci/pci.h"
+
 #define TYPE_NEWDEV_DEVICE "newdev"
 #define NEWDEV(obj)        OBJECT_CHECK(NewdevState, obj, TYPE_NEWDEV_DEVICE)
 
@@ -66,9 +69,15 @@ typedef struct {
     uint32_t *buf;
 
     QemuThread thread;
+
     QemuMutex thr_mutex;
     QemuCond thr_cond;
+
+    QemuMutex thr_mutex_migration;
+    QemuCond thr_cond_migration;
+
     bool stopping;
+    bool ready_to_migration;
     uint32_t irq_status;
 
 
@@ -78,3 +87,6 @@ typedef struct {
     int connect_fd; //connected socket fd (use for command exchange)
 
 } NewdevState;
+
+NewdevState *get_newdev_state(void);
+bool get_ready_to_migration(void);
