@@ -2997,12 +2997,10 @@ void qemu_guest_free_page_hint(void *addr, size_t len)
  */
 static int ram_save_setup(QEMUFile *f, void *opaque)
 {
-    DBG("RAM SAVE SETUP \n");
-
-    if(get_ready_to_migration())
-        DBG("get_ready_to_migration TRUE");
-    else
-        DBG("get_ready_to_migration FALSE");
+    static int count = 0;
+    count++;
+    DBG("RAM SAVE SETUP , count %d \n", count);
+    NewdevState* newdev;
 
     RAMState **rsp = opaque;
     RAMBlock *block;
@@ -3036,6 +3034,13 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
             }
         }
     }
+
+    newdev = get_newdev_state();
+    qemu_mutex_lock(&newdev->thr_mutex_migration);
+    while (!newdev->ready_to_migration)
+        qemu_cond_wait(&newdev->thr_cond_migration, &newdev->thr_mutex_migration);
+    qemu_mutex_unlock(&newdev->thr_mutex_migration);
+    DBG("ready_to_migration inside ram.c");
 
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);

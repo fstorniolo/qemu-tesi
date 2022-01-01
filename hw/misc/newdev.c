@@ -436,11 +436,10 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             //             break;
             //     }
             // }
-
             
             struct bpf_injection_msg_header* myheader;
             myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
-            DBG("version: %d type: %d payload-len: %d", myheader->type, myheader->type, myheader->payload_len);
+            DBG("version: %d type: %d payload-len: %d", myheader->version, myheader->type, myheader->payload_len);
             
             switch(myheader->type){
                 case FIRST_ROUND_MIGRATION:
@@ -451,7 +450,7 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
 
                     unsigned long high_addr, low_addr, order;
 
-                    for(int i = 0; i < myheader->payload_len / (12); i++){
+                    for(int i = 0; i < myheader->payload_len / 12; i++){
                         high_addr = *(newdev->buf + 5 + i * 3);
                         low_addr = *(newdev->buf + 5 + i * 3 + 1);
                         order = *(newdev->buf + 5 + i * 3 + 2);
@@ -459,6 +458,12 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
 
                         DBG("Address: %lx Order: %lu", free_page_addr, order);
                     }
+
+                    qemu_mutex_lock(&newdev->thr_mutex_migration);
+                    newdev->ready_to_migration = true;
+                    qemu_cond_signal(&newdev->thr_cond_migration);
+                    qemu_mutex_unlock(&newdev->thr_mutex_migration);
+
                     break;
 
                 default:
