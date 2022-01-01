@@ -437,11 +437,33 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             //     }
             // }
 
-            {
-                struct bpf_injection_msg_header* myheader;
-                myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
-                send(newdev->connect_fd, myheader, sizeof(struct bpf_injection_msg_header), 0);
-                send(newdev->connect_fd, newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
+            
+            struct bpf_injection_msg_header* myheader;
+            myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
+            DBG("version: %d type: %d payload-len: %d", myheader->type, myheader->type, myheader->payload_len);
+            
+            switch(myheader->type){
+                case FIRST_ROUND_MIGRATION:
+                    if(myheader->payload_len % 3 != 0){
+                        DBG("Unexpected payload len in FIRST_ROUND_MIGRATION");
+                        break;
+                    }
+
+                    unsigned long high_addr, low_addr, order;
+
+                    for(int i = 0; i < myheader->payload_len / (12); i++){
+                        high_addr = *(newdev->buf + 5 + i * 3);
+                        low_addr = *(newdev->buf + 5 + i * 3 + 1);
+                        order = *(newdev->buf + 5 + i * 3 + 2);
+                        hwaddr free_page_addr = (high_addr << 32) + low_addr;
+
+                        DBG("Address: %lx Order: %lu", free_page_addr, order);
+                    }
+                    break;
+
+                default:
+                    DBG("Default case");
+                    break;
             }
 
             //reset doorbell
@@ -485,8 +507,6 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             newdev->buf[index] = val;
             break;
     }
-
-
     return;
 }
 
