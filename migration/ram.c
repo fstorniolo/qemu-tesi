@@ -56,6 +56,9 @@
 #include "multifd.h"
 #include "sysemu/runstate.h"
 #include "hw/misc/newdev.h"
+#include "hw/misc/bpf_injection_msg.h"
+#include "accel/kvm/translate-gpa_2_hva.h"
+
 
 #include "hw/boards.h" /* for machine_dump_guest_core() */
 
@@ -2837,6 +2840,9 @@ static void ram_list_init_bitmaps(void)
              * dirty_memory[DIRTY_MEMORY_MIGRATION] don't include the whole
              * guest memory.
              */
+
+            DBG("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
+            DBG("pages %lu:", pages);
             block->bmap = bitmap_new(pages);
             bitmap_set(block->bmap, 0, pages);
             block->clear_bmap_shift = shift;
@@ -3000,7 +3006,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     static int count = 0;
     count++;
     DBG("RAM SAVE SETUP , count %d \n", count);
-    NewdevState* newdev;
+    // NewdevState* newdev;
 
     RAMState **rsp = opaque;
     RAMBlock *block;
@@ -3022,6 +3028,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         qemu_put_be64(f, ram_bytes_total_common(true) | RAM_SAVE_FLAG_MEM_SIZE);
 
         RAMBLOCK_FOREACH_MIGRATABLE(block) {
+            DBG("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
             qemu_put_byte(f, strlen(block->idstr));
             qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
             qemu_put_be64(f, block->used_length);
@@ -3035,12 +3042,45 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         }
     }
 
-    newdev = get_newdev_state();
+
+    DBG("Address: %d", 0xa0000);
+    void* hva = translate_gpa_2_hva(0xa0000);
+    DBG("Address translated: %p", hva);
+
+    /*newdev = get_newdev_state();
     qemu_mutex_lock(&newdev->thr_mutex_migration);
+    
     while (!newdev->ready_to_migration)
         qemu_cond_wait(&newdev->thr_cond_migration, &newdev->thr_mutex_migration);
+
     qemu_mutex_unlock(&newdev->thr_mutex_migration);
+
+    struct bpf_injection_msg_header* myheader = (struct bpf_injection_msg_header*)&newdev->buf[4];
     DBG("ready_to_migration inside ram.c");
+
+    DBG("myheader: type %d, version: %d, len: %d \n", myheader->type, myheader->version, myheader->payload_len); 
+
+    unsigned long high_addr, low_addr, order;
+    hwaddr free_page_addr;
+
+    high_addr = *(newdev->buf + 5);
+    low_addr = *(newdev->buf + 5 + 1);
+    order = *(newdev->buf + 5 + 2);
+    free_page_addr = (high_addr << 32) + low_addr;
+
+    DBG("free_page_addr: %lx order: %lu", free_page_addr, order);
+
+    void* hva = translate_gpa_2_hva(free_page_addr);
+    DBG("Address translated: %p", hva);*/
+
+
+
+/*
+    void* translation = newdev_translate_addr(newdev, free_page_addr, 0);
+    DBG("Address translated: %p", translation);
+    */
+
+
 
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);

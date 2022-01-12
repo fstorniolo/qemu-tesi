@@ -42,6 +42,7 @@
 #include "hw/misc/bpf_injection_msg.h"
 #include "hw/misc/newdev.h"
 #include "hw/core/cpu.h"
+#include "accel/kvm/translate-gpa_2_hva.h"
 
 //Affinity part
 #include <sys/sysinfo.h>
@@ -73,6 +74,37 @@ static NewdevState *newdev_p;
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val);
 static void connected_handle_read(void *opaque);
 int map_hyperthread(cpu_set_t* set);
+
+
+struct bpf_injection_msg_t prepare_bpf_injection_message(const char* path){
+    struct bpf_injection_msg_t mymsg;
+    int len;
+    mymsg.header.version = DEFAULT_VERSION;
+    mymsg.header.type = PROGRAM_INJECTION;
+    FILE* fp = fopen(path, "r");
+    if(fp) {
+        fseek(fp, 0 , SEEK_END);
+        mymsg.header.payload_len = ftell(fp);     
+        fseek(fp, 0 , SEEK_SET);// needed for next read from beginning of file
+        mymsg.payload = malloc(mymsg.header.payload_len);
+        len = fread(mymsg.payload, 1, mymsg.header.payload_len, fp);
+        // printf("readlen %d\n", len);
+        if(len != mymsg.header.payload_len) {
+            // printf("Error preparing the message\n");
+            mymsg.header.type = ERROR;
+            fclose(fp);
+            free(mymsg.payload);
+            return mymsg;
+        }
+      fclose(fp);
+    }
+    return mymsg;
+}
+
+void print_bpf_injection_message(struct bpf_injection_msg_header myheader){
+    printf("  Version:%u\n  Type:%u\n  Payload_len:%u\n", myheader.version, myheader.type, myheader.payload_len);
+}
+
 
 
 int map_hyperthread(cpu_set_t* set){
@@ -378,7 +410,6 @@ static uint64_t newdev_bufmmio_read(void *opaque, hwaddr addr, unsigned size){
         return 0;
     }
 
-
     switch(index){
         case 0:
             DBG("BUF read [case 0] val=0x%08" PRIx32, newdev->irq_status);
@@ -457,6 +488,8 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                         hwaddr free_page_addr = (high_addr << 32) + low_addr;
 
                         DBG("Address: %lx Order: %lu", free_page_addr, order);
+                        void* hva = translate_gpa_2_hva(free_page_addr);
+                        DBG("Address translated: %p", hva);
                     }
 
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
@@ -663,8 +696,7 @@ newdev_memli_commit(MemoryListener *listener)
     g_free(old_trans_entries);
 }
 
-static inline void *
-newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len)
+void* newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len)
 {
     DBG("Inside newdev_translate_addr");
     NewdevTranslateEntry *te = s->trans_entries + 0;

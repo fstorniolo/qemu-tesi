@@ -47,7 +47,7 @@
 #include "kvm-cpus.h"
 
 #include "hw/boards.h"
-
+#include "translate-gpa_2_hva.h"
 /* This check must be after config-host.h is included */
 #ifdef CONFIG_EVENTFD
 #include <sys/eventfd.h>
@@ -3307,6 +3307,62 @@ int kvm_remove_breakpoint(CPUState *cpu, target_ulong addr,
         }
     }
     return 0;
+}
+
+/*
+
+static KVMSlot *find_slot_containing(hwaddr gpa, KVMState *s)
+{
+    KVMMemoryListener *kml = &s->memory_listener;
+    KVMSlot *slot = NULL;
+    int i;
+    kvm_slots_lock();
+    for (i = 0; i < s->nr_slots; i++) {
+        KVMSlot *mem = &kml->slots[i];
+        if (gpa >= mem->start_addr && 
+                gpa < mem->start_addr + mem->memory_size){
+            slot = mem;
+            break;
+        }
+    }
+    kvm_slots_unlock();
+    return slot;
+}
+
+hwaddr translate_gpa_to_hva(hwaddr gpa)
+{
+    KVMSlot* current_slot = find_slot_containing(gpa, KVMState);
+    hwaddr hva = kvm_physical_memory_addr_to_host(s, gpa);
+    return hva;
+}
+
+*/
+static void *kvm_physical_memory_addr_to_host(KVMState *s, hwaddr gpa)
+{
+    KVMMemoryListener *kml = &s->memory_listener;
+    int i;
+    void *hva = NULL;
+
+    kvm_slots_lock();
+    for (i = 0; i < s->nr_slots; i++) {
+        KVMSlot *mem = &kml->slots[i];
+
+        if (gpa >= mem->start_addr && 
+                gpa < mem->start_addr + mem->memory_size){
+            
+            hva = (void *)
+                ((char *)mem->ram + gpa - mem->start_addr);
+            break;
+        }
+    }
+    kvm_slots_unlock();
+
+    return hva;
+}
+
+void *translate_gpa_2_hva(hwaddr gpa)
+{
+    return kvm_physical_memory_addr_to_host(kvm_state, gpa);
 }
 
 void kvm_remove_all_breakpoints(CPUState *cpu)

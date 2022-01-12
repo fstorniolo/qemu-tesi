@@ -43,11 +43,13 @@
 // +---+--------------------------------+
 
 typedef struct NewdevTranslateEntry {
+
     uint64_t gpa_start;
     uint64_t gpa_end;
     uint64_t size;
     void *hva_start;
     MemoryRegion *mr;
+
 } NewdevTranslateEntry;
 
 typedef struct {
@@ -90,3 +92,4 @@ typedef struct {
 
 NewdevState *get_newdev_state(void);
 bool get_ready_to_migration(void);
+void* newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len);
