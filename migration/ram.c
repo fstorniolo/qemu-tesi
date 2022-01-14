@@ -2804,6 +2804,7 @@ static int ram_state_init(RAMState **rsp)
      * This must match with the initial values of dirty bitmap.
      */
     (*rsp)->migration_dirty_pages = ram_bytes_total() >> TARGET_PAGE_BITS;
+    DBG("ram_state_init: ram_bytes_total %lu TARGET_PAGE_BITS: %d, migration_dirty_pages: %lu", ram_bytes_total(), TARGET_PAGE_BITS,(*rsp)->migration_dirty_pages);
     ram_state_reset(*rsp);
 
     return 0;
@@ -2843,7 +2844,15 @@ static void ram_list_init_bitmaps(void)
 
             DBG("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
             DBG("pages %lu:", pages);
+            MemoryRegion* block_mr = block->mr;
             block->bmap = bitmap_new(pages);
+            
+            if(block_mr->ram == true)
+                DBG("MR FOR THIS BLOCK IS IN RAM \n");
+            else
+                DBG("MR FOR THIS BLOCK IS NOT IN RAM \n");
+
+            DBG("MR hwaddr addr %lx:", block_mr->addr);
             bitmap_set(block->bmap, 0, pages);
             block->clear_bmap_shift = shift;
             block->clear_bmap = bitmap_new(clear_bmap_size(pages, shift));
@@ -3006,7 +3015,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     static int count = 0;
     count++;
     DBG("RAM SAVE SETUP , count %d \n", count);
-    // NewdevState* newdev;
+    NewdevState* newdev;
 
     RAMState **rsp = opaque;
     RAMBlock *block;
@@ -3043,11 +3052,9 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     }
 
 
-    DBG("Address: %d", 0xa0000);
-    void* hva = translate_gpa_2_hva(0xa0000);
-    DBG("Address translated: %p", hva);
 
-    /*newdev = get_newdev_state();
+
+    newdev = get_newdev_state();
     qemu_mutex_lock(&newdev->thr_mutex_migration);
     
     while (!newdev->ready_to_migration)
@@ -3062,23 +3069,26 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
 
     unsigned long high_addr, low_addr, order;
     hwaddr free_page_addr;
+    if(myheader->payload_len % 3 != 0){
+        DBG("Unexpected payload len in FIRST_ROUND_MIGRATION");
+        return -1;
+    }
 
-    high_addr = *(newdev->buf + 5);
-    low_addr = *(newdev->buf + 5 + 1);
-    order = *(newdev->buf + 5 + 2);
-    free_page_addr = (high_addr << 32) + low_addr;
+    for(int i = 0; i < myheader->payload_len / 12; i++){
+        high_addr = *(newdev->buf + 5 + i * 3);
+        low_addr = *(newdev->buf + 5 + i * 3 + 1);
+        order = *(newdev->buf + 5 + i * 3 + 2);
+        free_page_addr = (high_addr << 32) + low_addr;
 
-    DBG("free_page_addr: %lx order: %lu", free_page_addr, order);
+        DBG("Address: %lx Order: %lu", free_page_addr, order);
+        void* hva = translate_gpa_2_hva(free_page_addr);
+        if(hva == NULL)
+            continue;
 
-    void* hva = translate_gpa_2_hva(free_page_addr);
-    DBG("Address translated: %p", hva);*/
+        DBG("Address translated: %p", hva);
+        qemu_guest_free_page_hint(hva, (4 * 1024) << order);
+    }
 
-
-
-/*
-    void* translation = newdev_translate_addr(newdev, free_page_addr, 0);
-    DBG("Address translated: %p", translation);
-    */
 
 
 

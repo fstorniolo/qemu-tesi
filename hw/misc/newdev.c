@@ -489,7 +489,8 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
 
                         DBG("Address: %lx Order: %lu", free_page_addr, order);
                         void* hva = translate_gpa_2_hva(free_page_addr);
-                        DBG("Address translated: %p", hva);
+                        if(hva != NULL)
+                            DBG("Address translated: %p", hva);
                     }
 
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
