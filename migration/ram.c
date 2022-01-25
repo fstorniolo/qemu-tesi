@@ -76,6 +76,14 @@
 #define DBG(fmt, ...) do {} while (0)
 #endif
 
+
+#if RAM_MIGRATION_DEBUG > 1
+#define DBG_V(fmt, ...) do { \
+        fprintf(stderr, "ram-migration: " fmt "\n", ## __VA_ARGS__); \
+    } while (0)
+#else
+#define DBG_V(fmt, ...) do {} while (0)
+#endif
 /***********************************************************/
 /* ram save/restore */
 
@@ -3020,6 +3028,8 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     RAMState **rsp = opaque;
     RAMBlock *block;
 
+    // tell the guest to prepare the pages
+
     if (compress_threads_save_setup()) {
         return -1;
     }
@@ -3037,7 +3047,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         qemu_put_be64(f, ram_bytes_total_common(true) | RAM_SAVE_FLAG_MEM_SIZE);
 
         RAMBLOCK_FOREACH_MIGRATABLE(block) {
-            DBG("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
+            DBG_V("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
             qemu_put_byte(f, strlen(block->idstr));
             qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
             qemu_put_be64(f, block->used_length);
@@ -3050,9 +3060,6 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
             }
         }
     }
-
-
-
 
     newdev = get_newdev_state();
     qemu_mutex_lock(&newdev->thr_mutex_migration);
@@ -3080,17 +3087,23 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         order = *(newdev->buf + 5 + i * 3 + 2);
         free_page_addr = (high_addr << 32) + low_addr;
 
-        DBG("Address: %lx Order: %lu", free_page_addr, order);
+        DBG_V("Address: %lx Order: %lu", free_page_addr, order);
         void* hva = translate_gpa_2_hva(free_page_addr);
         if(hva == NULL)
             continue;
 
-        DBG("Address translated: %p", hva);
+        DBG_V("Address translated: %p", hva);
         qemu_guest_free_page_hint(hva, (4 * 1024) << order);
     }
 
 
+    qemu_mutex_lock(&newdev->thr_mutex_end_1st_round_migration);
+    newdev->end_1st_round_migration = true;
+    qemu_cond_signal(&newdev->thr_cond_end_1st_round_migration);
+    qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
 
+    // DBG("Setup Migration Phase Ended, communicating it to the device \n");
+    // setup_migration_phase_ended();
 
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);

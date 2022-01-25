@@ -78,8 +78,13 @@ typedef struct {
     QemuMutex thr_mutex_migration;
     QemuCond thr_cond_migration;
 
+    QemuMutex thr_mutex_end_1st_round_migration;
+    QemuCond thr_cond_end_1st_round_migration;
+
     bool stopping;
     bool ready_to_migration;
+    bool end_1st_round_migration;
+
     uint32_t irq_status;
 
 
@@ -93,3 +98,6 @@ typedef struct {
 NewdevState *get_newdev_state(void);
 bool get_ready_to_migration(void);
 void* newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len);
+void setup_migration_phase_ended(void);
+void setup_migration_phase_start(void);
+

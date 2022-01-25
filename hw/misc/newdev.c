@@ -53,7 +53,7 @@
 
 /* Debug information. Define it as 1 get for basic debugging,
  * and as 2 to get additional (verbose) memory listener logs. */
-#define NEWDEV_DEBUG 2
+#define NEWDEV_DEBUG 1
 
 #if NEWDEV_DEBUG > 0
 #define DBG(fmt, ...) do { \
@@ -61,6 +61,14 @@
     } while (0)
 #else
 #define DBG(fmt, ...) do {} while (0)
+#endif
+
+#if NEWDEV_DEBUG > 1
+#define DBG_V(fmt, ...) do { \
+        fprintf(stderr, "newdev-pci: " fmt "\n", ## __VA_ARGS__); \
+    } while (0)
+#else
+#define DBG_V(fmt, ...) do {} while (0)
 #endif
 
 static const char *regnames[] = {
@@ -310,6 +318,10 @@ static void connected_handle_read(void *opaque){
                 qemu_mutex_unlock(&newdev->thr_mutex_migration);
 
                 DBG("Payload: %d",*(int*) (newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)));
+
+
+
+
                 break;
             }
         default:
@@ -429,8 +441,8 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
     addr = addr & NEWDEV_BUF_MASK;
     index = addr >> 2;
 
-    DBG("INSIDE BUFMMIO WRITE");
-    DBG("Addr: %ld, Index: %d", addr, index);
+    DBG_V("INSIDE BUFMMIO WRITE");
+    DBG_V("Addr: %ld, Index: %d", addr, index);
 
     if (addr + size > NEWDEV_BUF_SIZE * sizeof(uint32_t)) {
         DBG("Out of bounds BUF write, addr=0x%08"PRIx64, addr);
@@ -485,18 +497,33 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                         high_addr = *(newdev->buf + 5 + i * 3);
                         low_addr = *(newdev->buf + 5 + i * 3 + 1);
                         order = *(newdev->buf + 5 + i * 3 + 2);
-                        hwaddr free_page_addr = (high_addr << 32) + low_addr;
+                        hwaddr free_page_addr = (high_addr << 32) + low_addr + order - order;
 
-                        DBG("Address: %lx Order: %lu", free_page_addr, order);
+                        DBG_V("Address: %lx Order: %lu", free_page_addr, order);
                         void* hva = translate_gpa_2_hva(free_page_addr);
                         if(hva != NULL)
-                            DBG("Address translated: %p", hva);
+                            DBG_V("Address translated: %p", hva);
                     }
 
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
                     newdev->ready_to_migration = true;
                     qemu_cond_signal(&newdev->thr_cond_migration);
                     qemu_mutex_unlock(&newdev->thr_mutex_migration);
+
+
+                    // Waiting for the end of setup migration to communicate to the guest driver setup migration phase is ended
+
+                    DBG("Waiting for end of  setup migration phase \n");
+
+                    qemu_mutex_lock(&newdev->thr_mutex_end_1st_round_migration);
+
+                    while (!newdev->end_1st_round_migration)
+                        qemu_cond_wait(&newdev->thr_cond_end_1st_round_migration, &newdev->thr_mutex_end_1st_round_migration);
+
+                    qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
+                    DBG("Setup phase migration is ended \n");
+
+
 
                     break;
 
@@ -542,12 +569,14 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                 break;
             }
         default:
-            DBG("WRITING IN THE BUFFER: %lu AT INDEX: %d" , val, index);
+            DBG_V("WRITING IN THE BUFFER: %lu AT INDEX: %d" , val, index);
             newdev->buf[index] = val;
             break;
     }
     return;
 }
+
+
 
 
 static const MemoryRegionOps newdev_io_ops = {
@@ -580,6 +609,21 @@ NewdevState *get_newdev_state(void){
 bool get_ready_to_migration(void){
     NewdevState* new_dev_state = get_newdev_state();
     return new_dev_state->ready_to_migration;
+}
+
+void setup_migration_phase_start(void)
+{
+    DBG("SETUP MIGRATION PHASE START \n");
+    newdev_raise_irq(newdev_p, FIRST_ROUND_MIGRATION_START); 
+}
+
+
+void setup_migration_phase_ended(void)
+{
+    // Comunicate to the guest driver setup migration phase is ended
+    DBG("SETUP MIGRATION PHASE ENDED \n");
+    newdev_raise_irq(newdev_p, FIRST_ROUND_MIGRATION_ENDED);
+
 }
 
 static int make_socket (uint16_t port){
@@ -636,10 +680,8 @@ newdev_memli_region_add(MemoryListener *listener,
 
     hva_start = memory_region_get_ram_ptr(section->mr) +
                       section->offset_within_region;
-#if NEWDEV_DEBUG > 1
-    DBG("new memory section %lx-%lx sz %lx %p", gpa_start, gpa_end,
+    DBG_V("new memory section %lx-%lx sz %lx %p", gpa_start, gpa_end,
         size, hva_start);
-#endif
     if (s->num_trans_entries_tmp > 0) {
         /* Check if we can coalasce the last MemoryRegionSection to
          * the current one. */
@@ -683,7 +725,7 @@ newdev_memli_commit(MemoryListener *listener)
 #if NEWDEV_DEBUG > 1
     for (i = 0; i < s->num_trans_entries; i++) {
         NewdevTranslateEntry *te = s->trans_entries + i;
-        DBG("    entry %d: gpa %lx-%lx size %lx hva_start %p", i,
+        DBG_V("    entry %d: gpa %lx-%lx size %lx hva_start %p", i,
             te->gpa_start, te->gpa_end, te->size, te->hva_start);
     }
 #endif
@@ -699,7 +741,7 @@ newdev_memli_commit(MemoryListener *listener)
 
 void* newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len)
 {
-    DBG("Inside newdev_translate_addr");
+    DBG_V("Inside newdev_translate_addr");
     NewdevTranslateEntry *te = s->trans_entries + 0;
 
     if (unlikely(!(te->gpa_start <= gpa && gpa + len <= te->gpa_end))) {
@@ -740,6 +782,9 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
 
     qemu_mutex_init(&newdev->thr_mutex_migration);
     qemu_cond_init(&newdev->thr_cond_migration);
+
+    qemu_mutex_init(&newdev->thr_mutex_end_1st_round_migration);
+    qemu_cond_init(&newdev->thr_cond_end_1st_round_migration);
 
     /* Init I/O mapped memory region, exposing newdev registers. */
     memory_region_init_io(&newdev->regs, OBJECT(newdev), &newdev_io_ops, newdev,
@@ -785,6 +830,7 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     memory_listener_register(&newdev->memory_listener, &address_space_memory);
     
     newdev->ready_to_migration = false;
+    newdev->end_1st_round_migration = false;
     DBG("qemu listen_fd added");
 
 
@@ -807,6 +853,9 @@ static void newdev_uninit(PCIDevice *pdev)
 
     qemu_cond_destroy(&newdev->thr_cond_migration);
     qemu_mutex_destroy(&newdev->thr_mutex_migration);
+
+    qemu_cond_destroy(&newdev->thr_cond_end_1st_round_migration);
+    qemu_mutex_destroy(&newdev->thr_mutex_end_1st_round_migration);
 
     msi_uninit(pdev);
 
