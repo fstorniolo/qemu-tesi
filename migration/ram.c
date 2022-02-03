@@ -3029,6 +3029,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     RAMBlock *block;
 
     // tell the guest to prepare the pages
+    setup_migration_phase_start();
 
     if (compress_threads_save_setup()) {
         return -1;
