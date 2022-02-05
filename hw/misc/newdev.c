@@ -46,7 +46,6 @@
 
 //Affinity part
 #include <sys/sysinfo.h>
-#include <sched.h>
 #define MAX_CPU 64
 #define SET_SIZE CPU_ALLOC_SIZE(64)
 #define NEWDEV_DEVICE_ID 0x11ea
@@ -114,44 +113,11 @@ void print_bpf_injection_message(struct bpf_injection_msg_header myheader){
 }
 
 
-
-int map_hyperthread(cpu_set_t* set){
-    //Modifies cpu_set only if one cpu is set in 
-    int i=0;
-    int setCount=0;
-    int settedCpu;
-    int remappedCpu = -1;
-    for(i=0; i<MAX_CPU; i++){
-        if(CPU_ISSET_S(i, SET_SIZE, set)){
-            setCount++;
-            settedCpu = i;
-        }
-    }
-    if(setCount == 1){
-        CPU_ZERO_S(SET_SIZE, set);
-        if(settedCpu%2 == 0){
-            remappedCpu = settedCpu / 2;
-        }
-        else{
-            remappedCpu = (get_nprocs()/2) + (settedCpu / 2);
-        }
-        CPU_SET_S(remappedCpu, SET_SIZE, set);
-
-        // DBG("map_hyperthread [guest] %d -> %d [host]", settedCpu, remappedCpu);
-    }
-    return remappedCpu;
-}
-
 static void accept_handle_read(void *opaque){
     NewdevState *newdev = opaque;
 
     DBG("accept_handle_read\n");
     DBG("incoming connection on socket fd:\t%d\n", newdev->listen_fd);
-    
-
-    /* CAN RAISE IRQ HERE */
-    // DBG("raising irq for fun?\n");
-    // newdev_raise_irq(newdev, 22);
 
     //Accept connection from peer
     newdev->connect_fd = accept(newdev->listen_fd, NULL, NULL);
@@ -198,117 +164,15 @@ static void connected_handle_read(void *opaque){
     // Receive message payload. Place it in newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)
     // All those manipulation is because newdev->buf is a pointer to uint32_t so you have to provide offset in bytes/4 or in uint32_t
     len = recv(newdev->connect_fd, newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
-    // DBG("payload received of len: %d bytes", len);
 
-    //debug dump
-    // {
-    //     int payload_left = myheader->payload_len;
-    //     int offset = 0;
-    //     while(payload_left > 0){
-    //         unsigned int tmp = *(unsigned int*)(newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t) + offset);
-    //         DBG("value\t%x", tmp);
-    //         offset += 1;
-    //         payload_left -= 4;
-    //         if(offset > 7)
-    //             break;
-    //     }
-    // }
-
-    //big switch depending on msg.header.type
     switch(myheader->type){
         case PROGRAM_INJECTION:
             // Program is stored in buf. Trigger interrupt to propagate this info
             // to the guest side. Convention::: use interrupt number equal to case
             DBG("PROGRAM_INJECTION-> interrupt fired");
             newdev_raise_irq(newdev, PROGRAM_INJECTION);
-            {
-                int i=0;
-                CPUState* cpu = qemu_get_cpu(i);
-                while(cpu != NULL){
-                    DBG("cpu #%d[%d]\tthread id:%d", i, cpu->cpu_index, cpu->thread_id);
-                    i++;
-                    cpu = qemu_get_cpu(i);
-                }
-                DBG("Guest has %d vCPUS", i);
-            }
             break;
-        case PROGRAM_INJECTION_RESULT:
-            break;
-        case PROGRAM_INJECTION_AFFINITY:
-            // Injection affinity infos are stored in buf.
-            {
-                struct cpu_affinity_infos_t* myaffinityinfo;
-                int vCPU_count=0;
-                CPUState* cpu = qemu_get_cpu(vCPU_count);
-                while(cpu != NULL){
-                    DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
-                    vCPU_count++;
-                    cpu = qemu_get_cpu(vCPU_count);                
-                }
-                DBG("Guest has %d vCPUS", vCPU_count);
-                myaffinityinfo = (struct cpu_affinity_infos_t*)(newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t));
-                myaffinityinfo->n_vCPU = vCPU_count;
-                DBG("#pCPU: %u", myaffinityinfo->n_pCPU);
-                DBG("#vCPU: %u", myaffinityinfo->n_vCPU);
-                newdev_raise_irq(newdev, PROGRAM_INJECTION_AFFINITY);
-            }
 
-
-            break;
-        case PROGRAM_INJECTION_AFFINITY_RESULT:
-            break;
-        case SHUTDOWN_REQUEST:
-            break;
-        case ERROR:
-            return;
-        case RESET:
-            {
-                uint64_t value = 0xFFFFFFFF;                
-                cpu_set_t *set;                
-                CPUState* cpu;
-                int vCPU_count=0;
-
-                set = CPU_ALLOC(MAX_CPU);
-                memcpy(set, &value, SET_SIZE);
-
-                cpu = qemu_get_cpu(vCPU_count);
-                while(cpu != NULL){
-                    DBG("cpu #%d[%d]\tthread id:%d\t RESET affinity", vCPU_count, cpu->cpu_index, cpu->thread_id);
-                    if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
-                        DBG("error sched_setaffinity");
-                    } 
-                    vCPU_count += 1;
-                    cpu = qemu_get_cpu(vCPU_count);   
-                }  
-                CPU_FREE(set);   
-                break;
-            }
-        case PIN_ON_SAME:
-            {                            
-                cpu_set_t *set;                
-                CPUState* cpu;
-                int vCPU_count=0;
-                set = CPU_ALLOC(MAX_CPU);
-                CPU_SET_S(0, SET_SIZE, set);    //static pin on pCPU0
-
-                cpu = qemu_get_cpu(vCPU_count);
-                while(cpu != NULL){
-                    DBG("cpu #%d[%d]\tthread id:%d\t PIN_ON_SAME [pcpu#%d]", vCPU_count, cpu->cpu_index, cpu->thread_id, 0);
-                    if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
-                        DBG("error sched_setaffinity");
-                    } 
-                    vCPU_count += 1;
-                    cpu = qemu_get_cpu(vCPU_count);   
-                }  
-                CPU_FREE(set);   
-                break;
-            }
-        case HT_REMAPPING:
-            {                            
-                newdev->hyperthreading_remapping = !newdev->hyperthreading_remapping;
-                DBG("HT_REMAPPING: %d", newdev->hyperthreading_remapping);
-                break;
-            }
         case FIRST_ROUND_MIGRATION:
             {
                 DBG("FIRST_ROUND_MIGRATION \n");
@@ -319,16 +183,12 @@ static void connected_handle_read(void *opaque){
 
                 DBG("Payload: %d",*(int*) (newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)));
 
-
-
-
                 break;
             }
         default:
             //unexpected value is threated like an error 
             return;            
     }
-
     return;
 }
 
@@ -429,8 +289,7 @@ static uint64_t newdev_bufmmio_read(void *opaque, hwaddr addr, unsigned size){
         default:
             break;
     }
-    // DBG("BUF read index=%u", index);
-    // DBG("BUF read val=0x%08" PRIx32, newdev->buf[index]);
+
     return newdev->buf[index];
 }
 
@@ -461,25 +320,7 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
         case 2:
             //doorbell region for guest->hw notification
             DBG("doorbell in device!");
-            //process this response from guest daemon...
 
-            //debug dump
-            // {
-            //     struct bpf_injection_msg_header* myheader;
-            //     myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
-            //     print_bpf_injection_message(*myheader); 
-            //     int payload_left = myheader->payload_len;
-            //     int offset = 0;
-            //     while(payload_left > 0){
-            //         unsigned int tmp = *(unsigned int*)(newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t) + offset);
-            //         DBG("value\t%x", tmp);
-            //         offset += 1;
-            //         payload_left -= 4;
-            //         if(offset > 7)
-            //             break;
-            //     }
-            // }
-            
             struct bpf_injection_msg_header* myheader;
             myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
             DBG("version: %d type: %d payload-len: %d", myheader->version, myheader->type, myheader->payload_len);
@@ -510,7 +351,6 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                     qemu_cond_signal(&newdev->thr_cond_migration);
                     qemu_mutex_unlock(&newdev->thr_mutex_migration);
 
-
                     // Waiting for the end of setup migration to communicate to the guest driver setup migration phase is ended
 
                     DBG("Waiting for end of  setup migration phase \n");
@@ -523,8 +363,6 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                     qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
                     DBG("Setup phase migration is ended \n");
 
-
-
                     break;
 
                 default:
@@ -536,38 +374,7 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             newdev->buf[index] = 0;
             break;
         case 3:
-            {
-                int vCPU_count=0;
-                uint64_t value = val;                
-                cpu_set_t *set;                
-                CPUState* cpu;
-
-                set = CPU_ALLOC(MAX_CPU);
-                memcpy(set, &value, SET_SIZE);                
-
-                cpu = qemu_get_cpu(vCPU_count);
-                while(cpu != NULL){
-                    DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
-                    if(CPU_ISSET_S(vCPU_count, SET_SIZE, set)){
-                        int remap = vCPU_count;
-                        if(newdev->hyperthreading_remapping == true){                            
-                            remap = map_hyperthread(set);   //if 1 cpu is set then remap, otherwise do nothing
-                        }
-                        if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
-                            DBG("error sched_setaffinity");
-                        }                          
-
-                        DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread %d) to pCPU%d", vCPU_count, cpu->thread_id, remap);
-                    }
-                    vCPU_count++;
-                    cpu = qemu_get_cpu(vCPU_count);                
-                }                
-                DBG("#pCPU: %u", get_nprocs()); //assuming NON hotpluggable cpus
-                DBG("#vCPU: %u", vCPU_count);            
-
-                CPU_FREE(set);
-                break;
-            }
+            break;
         default:
             DBG_V("WRITING IN THE BUFFER: %lu AT INDEX: %d" , val, index);
             newdev->buf[index] = val;
