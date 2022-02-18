@@ -332,9 +332,24 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                         break;
                     }
 
+                    // Get gpa buffer 
+                    unsigned long high_addr_buff, low_addr_buff;
+                    high_addr_buff = *(newdev->buf + 5 + (myheader->payload_len / 4));
+                    low_addr_buff = *(newdev->buf + 5 +(myheader->payload_len / 4) + 1);
+                    hwaddr address_buffer = (high_addr_buff << 32) + low_addr_buff;
+
+
+
+                    DBG("GPA HighAddress: %lx \n", high_addr_buff);
+                    DBG("GPA LowAddress: %lx \n", low_addr_buff);
+
+                    DBG("GPA Address: %lx \n", address_buffer);
+
                     unsigned long high_addr, low_addr, order;
 
+                    void* hva_address_buffer;
                     for(int i = 0; i < myheader->payload_len / 12; i++){
+                        
                         high_addr = *(newdev->buf + 5 + i * 3);
                         low_addr = *(newdev->buf + 5 + i * 3 + 1);
                         order = *(newdev->buf + 5 + i * 3 + 2);
@@ -344,8 +359,23 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                         void* hva = translate_gpa_2_hva(free_page_addr);
                         if(hva != NULL)
                             DBG_V("Address translated: %p", hva);
+
+
+                        hva_address_buffer = translate_gpa_2_hva(address_buffer);
+                        unsigned long *tmp = hva_address_buffer;
+                        hwaddr new_phys_page = *tmp;
+                        address_buffer += 8;
+
+                        hva_address_buffer = translate_gpa_2_hva(address_buffer);
+                        tmp = hva_address_buffer;
+                        hwaddr new_order  = *tmp;
+                        address_buffer += 8;
+
+                        if(new_order != order || new_phys_page != free_page_addr)
+                            DBG("Diversi \n");
                     }
 
+                    
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
                     newdev->ready_to_migration = true;
                     qemu_cond_signal(&newdev->thr_cond_migration);
@@ -362,7 +392,7 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
 
                     qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
                     DBG("Setup phase migration is ended \n");
-
+                    
                     break;
 
                 default:

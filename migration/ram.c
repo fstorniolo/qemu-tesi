@@ -3082,6 +3082,12 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         return -1;
     }
 
+    unsigned long high_addr_buff, low_addr_buff;
+    high_addr_buff = *(newdev->buf + 5 + (myheader->payload_len / 4));
+    low_addr_buff = *(newdev->buf + 5 +(myheader->payload_len / 4) + 1);
+    hwaddr address_buffer = (high_addr_buff << 32) + low_addr_buff;
+    void* hva_address_buffer;
+
     for(int i = 0; i < myheader->payload_len / 12; i++){
         high_addr = *(newdev->buf + 5 + i * 3);
         low_addr = *(newdev->buf + 5 + i * 3 + 1);
@@ -3089,12 +3095,25 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         free_page_addr = (high_addr << 32) + low_addr;
 
         DBG_V("Address: %lx Order: %lu", free_page_addr, order);
-        void* hva = translate_gpa_2_hva(free_page_addr);
+        void* hva = translate_gpa_2_hva(free_page_addr + order - order);
         if(hva == NULL)
             continue;
 
         DBG_V("Address translated: %p", hva);
-        qemu_guest_free_page_hint(hva, (4 * 1024) << order);
+
+        hva_address_buffer = translate_gpa_2_hva(address_buffer);
+        unsigned long *tmp = hva_address_buffer;
+        hwaddr new_phys_page = *tmp;
+        address_buffer += 8;
+
+        hva_address_buffer = translate_gpa_2_hva(address_buffer);
+        tmp = hva_address_buffer;
+        hwaddr new_order  = *tmp;
+        address_buffer += 8;
+
+        void *new_hva = translate_gpa_2_hva(new_phys_page);
+
+        qemu_guest_free_page_hint(new_hva, (4 * 1024) << new_order);
     }
 
 
