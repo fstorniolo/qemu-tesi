@@ -44,11 +44,29 @@
 #include "hw/core/cpu.h"
 #include "accel/kvm/translate-gpa_2_hva.h"
 
+// Maffione includes
+#include "qemu/osdep.h"
+#include "hw/hw.h"
+#include "hw/pci/pci.h"
+#include "hw/pci/msi.h"
+#include "hw/pci/msix.h"
+#include "net/net.h"
+#include "sysemu/sysemu.h"
+#include "sysemu/kvm.h"
+#include "qemu/cutils.h"
+#include "qemu/error-report.h"
+#include "qemu/iov.h"
+#include "qemu/range.h"
+#include "qapi/error.h"
+#include "linux/virtio_net.h"
+
 //Affinity part
 #include <sys/sysinfo.h>
 #define MAX_CPU 64
 #define SET_SIZE CPU_ALLOC_SIZE(64)
 #define NEWDEV_DEVICE_ID 0x11ea
+#define BPF_INSN_SIZE   8
+
 
 /* Debug information. Define it as 1 get for basic debugging,
  * and as 2 to get additional (verbose) memory listener logs. */
@@ -80,7 +98,7 @@ static const char *regnames[] = {
 static NewdevState *newdev_p;
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val);
 static void connected_handle_read(void *opaque);
-int map_hyperthread(cpu_set_t* set);
+// static int newdev_progs_load(NewdevState *s /*const char *progsname, */);
 
 
 struct bpf_injection_msg_t prepare_bpf_injection_message(const char* path){
@@ -170,6 +188,8 @@ static void connected_handle_read(void *opaque){
             // Program is stored in buf. Trigger interrupt to propagate this info
             // to the guest side. Convention::: use interrupt number equal to case
             DBG("PROGRAM_INJECTION-> interrupt fired");
+            DBG("Payload size: %d", myheader->payload_len);
+            // newdev_progs_load(newdev);
             newdev_raise_irq(newdev, PROGRAM_INJECTION);
             break;
 
@@ -413,7 +433,23 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
     return;
 }
 
+static uint64_t
+newdev_progmmio_read(void *opaque, hwaddr addr, unsigned size)
+{
+    NewdevState *newdev = opaque;
+    uint32_t *readp;
 
+    DBG("Inside progmmio read");
+
+    if (addr + size > newdev->prog->num_insns * BPF_INSN_SIZE) {
+        DBG("Out of bounds prog I/O read, addr=0x%08"PRIx64, addr);
+        return 0;
+    }
+
+    readp = (uint32_t *)(((uint8_t *)newdev->prog->insns) + addr);
+
+    return *readp;
+}
 
 
 static const MemoryRegionOps newdev_io_ops = {
@@ -436,6 +472,19 @@ static const MemoryRegionOps newdev_bufmmio_ops = {
         .max_access_size = 4,
     },
 
+};
+
+static const MemoryRegionOps newdev_progmmio_ops = {
+    .read = newdev_progmmio_read,
+    .write = NULL, /* this is a read-only region */
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+    /* These are only limitations of the emulation code, and they are not
+     * visible to the guest, which can still perform larger or shorter
+     * writes. See description of 'impl' and 'valid' fields. */
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
 };
 
 NewdevState *get_newdev_state(void){
@@ -599,9 +648,161 @@ void* newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len)
     }
 
     return te->hva_start + (gpa - te->gpa_start);
-
 }
 
+/*
+static char *
+bpfhv_progpath(const char *progsname)
+{
+    //char filename[64];
+
+    //snprintf(filename, sizeof(filename), "%s_progs.o", progsname);
+
+    return qemu_find_file(2, progsname);
+}
+*/
+
+#if 0
+
+static int
+newdev_progs_load_fd(NewdevState *s, int fd, const char *path)
+{
+    const char *prog_names[1] = {"test"};
+    GElf_Ehdr ehdr;
+    int ret = -1;
+    Elf *elf;
+    int i;
+
+    for (i = 0; i < BPFHV_PROG_MAX; i++) {
+        if (s->prog->insns != NULL) {
+            g_free(s->prog->insns);
+            s->prog->insns = NULL;
+        }
+        s->prog->num_insns = 0;
+    }
+
+    if (elf_version(EV_CURRENT) == EV_NONE) {
+        DBG("ELF version mismatch \n");
+        return -1;
+    }
+    elf = elf_begin(fd, ELF_C_READ, NULL);
+    if (!elf) {
+        DBG("Failed to initialize ELF library for %s", path);
+        return -1;
+    }
+
+    if (gelf_getehdr(elf, &ehdr) != &ehdr) {
+        DBG("Failed to get ELF header for %s", path);
+        goto err;
+    }
+
+    for (i = 1; i < ehdr.e_shnum; i++) {
+        Elf_Data *sdata;
+        GElf_Shdr shdr;
+        Elf_Scn *scn;
+        char *shname;
+
+        scn = elf_getscn(elf, i);
+        if (!scn) {
+            continue;
+        }
+
+        if (gelf_getshdr(scn, &shdr) != &shdr) {
+            continue;
+        }
+
+        if (shdr.sh_type != SHT_PROGBITS) {
+            continue;
+        }
+
+        shname = elf_strptr(elf, ehdr.e_shstrndx, shdr.sh_name);
+        if (!shname || shdr.sh_size == 0) {
+            continue;
+        }
+
+        sdata = elf_getdata(scn, NULL);
+        if (!sdata || elf_getdata(scn, sdata) != NULL) {
+            continue;
+        }
+
+        {
+            int j;
+
+            for (j = 0; j < ARRAY_SIZE(prog_names); j++) {
+                if (!strcmp(shname, prog_names[j])) {
+                    break;
+                }
+            }
+
+            if (j >= ARRAY_SIZE(prog_names)) {
+                continue;
+            }
+
+            if (s->prog->insns != NULL) {
+                DBG("warning: %s contains more sections with name %s",
+                    path, prog_names[j]);
+                continue;
+            }
+
+            s->prog->insns = g_malloc(sdata->d_size);
+            memcpy(s->prog->insns, sdata->d_buf, sdata->d_size);
+            s->prog->num_insns = sdata->d_size / BPF_INSN_SIZE;
+        }
+    }
+
+    ret = 0;
+    // pstrcpy(s->progsname, sizeof(s->progsname), progsname);
+    // DBG("Loaded program: %s", s->progsname);
+err:
+    elf_end(elf);
+
+    return ret;
+} 
+
+
+static int
+newdev_progs_load(NewdevState *s /*const char *progsname, */)
+{
+    int ret = -1;
+    //char *path;
+    int fd;
+
+    /*if (!strncmp(progsname, s->progsname, sizeof(s->progsname))) {
+        return 0;
+    }
+
+    path = bpfhv_progpath(progsname);
+    if (!path) {
+        error_setg(errp, "Could not locate bpfhv_%s_progs.o", progsname);
+        return -1;
+    }*/
+
+    // const char *prog_name = "test_bpf_prog.o";
+
+    /*path = bpfhv_progpath(prog_name);
+    if (!path) {
+        //error_setg(errp, "Could not locate test_bpf_prog.o", progsname);
+        DBG("Could not locate test_bpf_prog.o \n");
+        return -1;
+    } */
+
+    char path[] = "/home/filippo/Desktop/Tesi/eBPF-injection/shared/guest_programs/test_bpf_prog.o";
+
+    fd = open(path, O_RDONLY, 0);
+    if (fd < 0) {
+        DBG("Failed to open %s", path);
+
+        // error_setg_errno(errp, errno, "Failed to open %s", path);
+    }
+
+    DBG("path: %s aperto \n", path);
+
+    ret = newdev_progs_load_fd(s, fd, path);
+    close(fd);
+
+    return ret;
+}
+#endif
 
 static void newdev_realize(PCIDevice *pdev, Error **errp)
 {
@@ -632,6 +833,14 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     memory_region_init_io(&newdev->mmio, OBJECT(newdev), &newdev_bufmmio_ops, newdev,
                     "newdev-buf", NEWDEV_BUF_SIZE * sizeof(uint32_t));
     pci_register_bar(pdev, NEWDEV_BUF_PCI_BAR, PCI_BASE_ADDRESS_SPACE_MEMORY, &newdev->mmio);
+    
+    /* Init memory mapped memory region, to expose eBPF programs. */
+    // TO DO: refactor this code
+    memory_region_init_io(&newdev->progmmio, OBJECT(newdev), &newdev_progmmio_ops, newdev,
+                          "newdev-prog", NEWDEV_BUF_SIZE * sizeof(uint32_t));
+    pci_register_bar(pdev, NEWDEV_PROG_PCI_BAR,
+                     PCI_BASE_ADDRESS_SPACE_MEMORY, &newdev->progmmio);
+
 
     newdev->buf = malloc(NEWDEV_BUF_SIZE * sizeof(uint32_t));
     

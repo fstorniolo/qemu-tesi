@@ -9,6 +9,8 @@
 
 #define NEWDEV_REG_PCI_BAR      0
 #define NEWDEV_BUF_PCI_BAR      1
+#define NEWDEV_PROG_PCI_BAR     2
+
 #define NEWDEV_REG_END          92
 #define NEWDEV_REG_MASK         0xff
 #define NEWDEV_BUF_MASK         0xffff
@@ -42,6 +44,13 @@
 // |   |                                |
 // +---+--------------------------------+
 
+typedef struct NewdevProg {
+    unsigned int num_insns;
+    uint64_t *insns;
+} NewdevProg;
+
+enum progs {test, BPFHV_PROG_MAX};
+
 typedef struct NewdevTranslateEntry {
 
     uint64_t gpa_start;
@@ -56,6 +65,9 @@ typedef struct {
     PCIDevice pdev;
     MemoryRegion regs;
     MemoryRegion mmio;
+    MemoryRegion progmmio;
+    NewdevProg *prog;
+
 
     // Used for address translation
     MemoryListener memory_listener;
