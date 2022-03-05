@@ -93,9 +93,12 @@ typedef struct {
     QemuMutex thr_mutex_end_1st_round_migration;
     QemuCond thr_cond_end_1st_round_migration;
 
+    QemuMutex migration_optimization_enabled_mutex;
+
     bool stopping;
     bool ready_to_migration;
     bool end_1st_round_migration;
+    bool migration_optimization_enabled;
 
     uint32_t irq_status;
 

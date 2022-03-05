@@ -3018,11 +3018,69 @@ void qemu_guest_free_page_hint(void *addr, size_t len)
  * @f: QEMUFile where to send the data
  * @opaque: RAMState pointer
  */
+
+static void optimize_setup_phase(NewdevState *newdev)
+{
+    qemu_mutex_lock(&newdev->thr_mutex_migration);
+    
+    while (!newdev->ready_to_migration)
+        qemu_cond_wait(&newdev->thr_cond_migration, &newdev->thr_mutex_migration);
+
+    qemu_mutex_unlock(&newdev->thr_mutex_migration);
+
+    unsigned long high_addr_buff, low_addr_buff;
+    high_addr_buff = *(newdev->buf + 5);
+    low_addr_buff = *(newdev->buf + 5 + 1);
+    int counter = *(newdev->buf + 5 + 2);
+
+    hwaddr address_buffer = (high_addr_buff << 32) + low_addr_buff;
+    void* hva_address_buffer;
+
+    for(int i = 0; i < counter; i++){
+        /*
+        high_addr = *(newdev->buf + 5 + i * 3);
+        low_addr = *(newdev->buf + 5 + i * 3 + 1);
+        order = *(newdev->buf + 5 + i * 3 + 2);
+        free_page_addr = (high_addr << 32) + low_addr;
+
+        DBG_V("Address: %lx Order: %lu", free_page_addr, order);
+        void* hva = translate_gpa_2_hva(free_page_addr + order - order);
+        if(hva == NULL)
+            continue;
+
+        DBG_V("Address translated: %p", hva);
+        */
+
+        hva_address_buffer = translate_gpa_2_hva(address_buffer);
+        unsigned long *tmp = hva_address_buffer;
+        hwaddr new_phys_page = *tmp;
+        address_buffer += 8;
+
+        hva_address_buffer = translate_gpa_2_hva(address_buffer);
+        tmp = hva_address_buffer;
+        hwaddr new_order  = *tmp;
+        address_buffer += 8;
+
+        void *new_hva = translate_gpa_2_hva(new_phys_page);
+
+        if(new_hva == NULL)
+            continue;
+
+        qemu_guest_free_page_hint(new_hva, (4 * 1024) << new_order);
+    }
+
+
+    qemu_mutex_lock(&newdev->thr_mutex_end_1st_round_migration);
+    newdev->end_1st_round_migration = true;
+    qemu_cond_signal(&newdev->thr_cond_end_1st_round_migration);
+    qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
+
+    // DBG("Setup Migration Phase Ended, communicating it to the device \n");
+    // setup_migration_phase_ended();
+}
+
 static int ram_save_setup(QEMUFile *f, void *opaque)
 {
-    static int count = 0;
-    count++;
-    DBG("RAM SAVE SETUP , count %d \n", count);
     NewdevState* newdev;
 
     RAMState **rsp = opaque;
@@ -3063,67 +3121,9 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     }
 
     newdev = get_newdev_state();
-    qemu_mutex_lock(&newdev->thr_mutex_migration);
-    
-    while (!newdev->ready_to_migration)
-        qemu_cond_wait(&newdev->thr_cond_migration, &newdev->thr_mutex_migration);
 
-    qemu_mutex_unlock(&newdev->thr_mutex_migration);
-
-    struct bpf_injection_msg_header* myheader = (struct bpf_injection_msg_header*)&newdev->buf[4];
-    DBG("ready_to_migration inside ram.c");
-
-    DBG("myheader: type %d, version: %d, len: %d \n", myheader->type, myheader->version, myheader->payload_len); 
-
-    unsigned long high_addr, low_addr, order;
-    hwaddr free_page_addr;
-    if(myheader->payload_len % 3 != 0){
-        DBG("Unexpected payload len in FIRST_ROUND_MIGRATION");
-        return -1;
-    }
-
-    unsigned long high_addr_buff, low_addr_buff;
-    high_addr_buff = *(newdev->buf + 5 + (myheader->payload_len / 4));
-    low_addr_buff = *(newdev->buf + 5 +(myheader->payload_len / 4) + 1);
-    hwaddr address_buffer = (high_addr_buff << 32) + low_addr_buff;
-    void* hva_address_buffer;
-
-    for(int i = 0; i < myheader->payload_len / 12; i++){
-        high_addr = *(newdev->buf + 5 + i * 3);
-        low_addr = *(newdev->buf + 5 + i * 3 + 1);
-        order = *(newdev->buf + 5 + i * 3 + 2);
-        free_page_addr = (high_addr << 32) + low_addr;
-
-        DBG_V("Address: %lx Order: %lu", free_page_addr, order);
-        void* hva = translate_gpa_2_hva(free_page_addr + order - order);
-        if(hva == NULL)
-            continue;
-
-        DBG_V("Address translated: %p", hva);
-
-        hva_address_buffer = translate_gpa_2_hva(address_buffer);
-        unsigned long *tmp = hva_address_buffer;
-        hwaddr new_phys_page = *tmp;
-        address_buffer += 8;
-
-        hva_address_buffer = translate_gpa_2_hva(address_buffer);
-        tmp = hva_address_buffer;
-        hwaddr new_order  = *tmp;
-        address_buffer += 8;
-
-        void *new_hva = translate_gpa_2_hva(new_phys_page);
-
-        qemu_guest_free_page_hint(new_hva, (4 * 1024) << new_order);
-    }
-
-
-    qemu_mutex_lock(&newdev->thr_mutex_end_1st_round_migration);
-    newdev->end_1st_round_migration = true;
-    qemu_cond_signal(&newdev->thr_cond_end_1st_round_migration);
-    qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
-
-    // DBG("Setup Migration Phase Ended, communicating it to the device \n");
-    // setup_migration_phase_ended();
+    if(newdev->migration_optimization_enabled)
+        optimize_setup_phase(newdev);
 
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);

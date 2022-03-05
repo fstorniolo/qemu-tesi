@@ -347,6 +347,8 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             
             switch(myheader->type){
                 case FIRST_ROUND_MIGRATION:
+
+                    #if 0
                     if(myheader->payload_len % 3 != 0){
                         DBG("Unexpected payload len in FIRST_ROUND_MIGRATION");
                         break;
@@ -394,6 +396,8 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                         if(new_order != order || new_phys_page != free_page_addr)
                             DBG("Diversi \n");
                     }
+
+                    #endif
 
                     
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
@@ -824,6 +828,8 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     qemu_mutex_init(&newdev->thr_mutex_end_1st_round_migration);
     qemu_cond_init(&newdev->thr_cond_end_1st_round_migration);
 
+    qemu_mutex_init(&newdev->migration_optimization_enabled_mutex);
+
     /* Init I/O mapped memory region, exposing newdev registers. */
     memory_region_init_io(&newdev->regs, OBJECT(newdev), &newdev_io_ops, newdev,
                     "newdev-regs", NEWDEV_REG_MASK + 1);
@@ -877,6 +883,7 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     
     newdev->ready_to_migration = false;
     newdev->end_1st_round_migration = false;
+    newdev->migration_optimization_enabled = true;
     DBG("qemu listen_fd added");
 
 
@@ -902,6 +909,8 @@ static void newdev_uninit(PCIDevice *pdev)
 
     qemu_cond_destroy(&newdev->thr_cond_end_1st_round_migration);
     qemu_mutex_destroy(&newdev->thr_mutex_end_1st_round_migration);
+
+    qemu_mutex_destroy(&newdev->migration_optimization_enabled_mutex);
 
     msi_uninit(pdev);
 
