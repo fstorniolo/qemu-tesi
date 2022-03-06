@@ -100,32 +100,6 @@ static void newdev_raise_irq(NewdevState *newdev, uint32_t val);
 static void connected_handle_read(void *opaque);
 // static int newdev_progs_load(NewdevState *s /*const char *progsname, */);
 
-
-struct bpf_injection_msg_t prepare_bpf_injection_message(const char* path){
-    struct bpf_injection_msg_t mymsg;
-    int len;
-    mymsg.header.version = DEFAULT_VERSION;
-    mymsg.header.type = PROGRAM_INJECTION;
-    FILE* fp = fopen(path, "r");
-    if(fp) {
-        fseek(fp, 0 , SEEK_END);
-        mymsg.header.payload_len = ftell(fp);     
-        fseek(fp, 0 , SEEK_SET);// needed for next read from beginning of file
-        mymsg.payload = malloc(mymsg.header.payload_len);
-        len = fread(mymsg.payload, 1, mymsg.header.payload_len, fp);
-        // printf("readlen %d\n", len);
-        if(len != mymsg.header.payload_len) {
-            // printf("Error preparing the message\n");
-            mymsg.header.type = ERROR;
-            fclose(fp);
-            free(mymsg.payload);
-            return mymsg;
-        }
-      fclose(fp);
-    }
-    return mymsg;
-}
-
 void print_bpf_injection_message(struct bpf_injection_msg_header myheader){
     printf("  Version:%u\n  Type:%u\n  Payload_len:%u\n", myheader.version, myheader.type, myheader.payload_len);
 }
@@ -194,17 +168,33 @@ static void connected_handle_read(void *opaque){
             break;
 
         case FIRST_ROUND_MIGRATION:
-            {
-                DBG("FIRST_ROUND_MIGRATION \n");
-                
-                qemu_mutex_lock(&newdev->thr_mutex_migration);
-                newdev->ready_to_migration = true;
-                qemu_mutex_unlock(&newdev->thr_mutex_migration);
+        
+            DBG("FIRST_ROUND_MIGRATION \n");
+            
+            qemu_mutex_lock(&newdev->thr_mutex_migration);
+            newdev->ready_to_migration = true;
+            qemu_mutex_unlock(&newdev->thr_mutex_migration);
 
-                DBG("Payload: %d",*(int*) (newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)));
+            DBG("Payload: %d",*(int*) (newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)));
+            break;
+        
 
-                break;
-            }
+        case PROGRAM_MEMORY_INFO:
+            // Program is stored in buf. Trigger interrupt to propagate this info
+            // to the guest side. Convention::: use interrupt number equal to case
+            DBG("PROGRAM_MEMORY_INFO-> interrupt fired");
+            DBG("Payload size: %d", myheader->payload_len);
+            // newdev_progs_load(newdev);
+            newdev_raise_irq(newdev, PROGRAM_MEMORY_INFO);
+            break;
+
+        case PROGRAM_SET_MAXIMUM_ORDER:
+            DBG("PROGRAM_SET_MAXIMUM_ORDER-> interrupt fired");
+            DBG("Payload size: %d", myheader->payload_len);
+            // newdev_progs_load(newdev);
+            newdev_raise_irq(newdev, PROGRAM_SET_MAXIMUM_ORDER);
+            break;
+            
         default:
             //unexpected value is threated like an error 
             return;            
