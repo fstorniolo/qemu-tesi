@@ -215,10 +215,12 @@ static void newdev_raise_irq(NewdevState *newdev, uint32_t val){
 static void newdev_lower_irq(NewdevState *newdev, uint32_t val){
     newdev->irq_status &= ~val;
     DBG("lower irq\tirq_status=%x", newdev->irq_status);
-    if (!newdev->irq_status) {
+    pci_set_irq(&newdev->pdev, 0);
+
+    /*if (!newdev->irq_status) {
         DBG("lower irq\tinside if");
         pci_set_irq(&newdev->pdev, 0);
-    }
+    }*/
 }
 
 static uint64_t newdev_io_read(void *opaque, hwaddr addr, unsigned size){
@@ -310,8 +312,8 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
     addr = addr & NEWDEV_BUF_MASK;
     index = addr >> 2;
 
-    DBG_V("INSIDE BUFMMIO WRITE");
-    DBG_V("Addr: %ld, Index: %d", addr, index);
+    DBG("INSIDE BUFMMIO WRITE");
+    DBG("Addr: %ld, Index: %d, Val: %ld", addr, index, val);
 
     if (addr + size > NEWDEV_BUF_SIZE * sizeof(uint32_t)) {
         DBG("Out of bounds BUF write, addr=0x%08"PRIx64, addr);
@@ -405,6 +407,18 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                         qemu_cond_wait(&newdev->thr_cond_end_1st_round_migration, &newdev->thr_mutex_end_1st_round_migration);
 
                     qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
+
+                    qemu_mutex_lock(&newdev->thr_mutex_migration);
+                    newdev->ready_to_migration = false;
+                    qemu_cond_signal(&newdev->thr_cond_migration);
+                    qemu_mutex_unlock(&newdev->thr_mutex_migration);
+
+                    qemu_mutex_lock(&newdev->thr_mutex_end_1st_round_migration);
+                    newdev->end_1st_round_migration = false;
+                    qemu_cond_signal(&newdev->thr_cond_end_1st_round_migration);
+                    qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
+
+
                     DBG("Setup phase migration is ended \n");
                     
                     break;

@@ -2850,17 +2850,10 @@ static void ram_list_init_bitmaps(void)
              * guest memory.
              */
 
-            DBG("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
-            DBG("pages %lu:", pages);
+
             MemoryRegion* block_mr = block->mr;
             block->bmap = bitmap_new(pages);
             
-            if(block_mr->ram == true)
-                DBG("MR FOR THIS BLOCK IS IN RAM \n");
-            else
-                DBG("MR FOR THIS BLOCK IS NOT IN RAM \n");
-
-            DBG("MR hwaddr addr %lx:", block_mr->addr);
             bitmap_set(block->bmap, 0, pages);
             block->clear_bmap_shift = shift;
             block->clear_bmap = bitmap_new(clear_bmap_size(pages, shift));
