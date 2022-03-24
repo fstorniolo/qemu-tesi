@@ -43,6 +43,8 @@
 #include "hw/misc/newdev.h"
 #include "hw/core/cpu.h"
 #include "accel/kvm/translate-gpa_2_hva.h"
+#include "migration/vmstate.h"
+
 
 // Maffione includes
 #include "qemu/osdep.h"
@@ -70,7 +72,7 @@
 
 /* Debug information. Define it as 1 get for basic debugging,
  * and as 2 to get additional (verbose) memory listener logs. */
-#define NEWDEV_DEBUG 1
+#define NEWDEV_DEBUG 2
 
 #if NEWDEV_DEBUG > 0
 #define DBG(fmt, ...) do { \
@@ -169,7 +171,7 @@ static void connected_handle_read(void *opaque){
 
         case FIRST_ROUND_MIGRATION:
         
-            DBG("FIRST_ROUND_MIGRATION \n");
+            DBG("FIRST_ROUND_MIGRATION IN HANDLE READ \n");
             
             qemu_mutex_lock(&newdev->thr_mutex_migration);
             newdev->ready_to_migration = true;
@@ -197,13 +199,17 @@ static void connected_handle_read(void *opaque){
             
         default:
             //unexpected value is threated like an error 
-            return;            
+            break;
+                //Remove connect_fd from watched fd in iothread select              
     }
     return;
 }
 
 
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val){
+
+    if(!val)
+        DBG("VAL IS 0");
     newdev->irq_status |= val;
     DBG("raise irq\tirq_status=%x", newdev->irq_status);
     if (newdev->irq_status) {
@@ -213,14 +219,16 @@ static void newdev_raise_irq(NewdevState *newdev, uint32_t val){
 }
 
 static void newdev_lower_irq(NewdevState *newdev, uint32_t val){
+    if(!val)
+        DBG("VAL IS 0");
+
     newdev->irq_status &= ~val;
     DBG("lower irq\tirq_status=%x", newdev->irq_status);
-    pci_set_irq(&newdev->pdev, 0);
 
-    /*if (!newdev->irq_status) {
+    if (!newdev->irq_status) {
         DBG("lower irq\tinside if");
         pci_set_irq(&newdev->pdev, 0);
-    }*/
+    }
 }
 
 static uint64_t newdev_io_read(void *opaque, hwaddr addr, unsigned size){
@@ -324,7 +332,7 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
 
     switch(index){
         case 0:
-            newdev_raise_irq(newdev, val);
+            DBG("Cannot call newdev_raise_irq from newdev_bufmmio_write");
             break;
         case 1:        
             newdev_lower_irq(newdev, val);
@@ -391,22 +399,31 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
 
                     #endif
 
-                    
+                    DBG_V("Requesting thr_mutex_migration");
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
+                    DBG_V("Inside thr_mutex_migration");
+
                     newdev->ready_to_migration = true;
                     qemu_cond_signal(&newdev->thr_cond_migration);
                     qemu_mutex_unlock(&newdev->thr_mutex_migration);
+                    DBG_V("Realising thr_mutex_migration");
+
 
                     // Waiting for the end of setup migration to communicate to the guest driver setup migration phase is ended
 
                     DBG("Waiting for end of  setup migration phase \n");
+                    DBG_V("Requesting thr_mutex_end_1st_round_migration");
 
                     qemu_mutex_lock(&newdev->thr_mutex_end_1st_round_migration);
+                    DBG_V("Inside thr_mutex_end_1st_round_migration, waiting for condition");
 
                     while (!newdev->end_1st_round_migration)
                         qemu_cond_wait(&newdev->thr_cond_end_1st_round_migration, &newdev->thr_mutex_end_1st_round_migration);
+                    DBG_V("Inside thr_mutex_end_1st_round_migration, condition checked");
 
                     qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
+                    DBG_V("Realising thr_mutex_end_1st_round_migration, condition checked");
+
 
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
                     newdev->ready_to_migration = false;
@@ -429,7 +446,7 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             }
 
             //reset doorbell
-            newdev->buf[index] = 0;
+            // newdev->buf[index] = 0;
             break;
         case 3:
             break;
@@ -492,6 +509,19 @@ static const MemoryRegionOps newdev_progmmio_ops = {
      * writes. See description of 'impl' and 'valid' fields. */
         .min_access_size = 4,
         .max_access_size = 4,
+    },
+};
+
+static const VMStateDescription newdev_vmsd = {
+    .name = TYPE_NEWDEV_DEVICE,
+    .version_id = 0,
+    .minimum_version_id = 0,
+    .pre_load = NULL,
+    .post_load = NULL,
+    .fields = (VMStateField[]) {
+        VMSTATE_PCI_DEVICE(pdev, NewdevState),
+        VMSTATE_BOOL(migration_optimization_enabled, NewdevState),
+        VMSTATE_END_OF_LIST()
     },
 };
 
@@ -574,8 +604,8 @@ newdev_memli_region_add(MemoryListener *listener,
 
     hva_start = memory_region_get_ram_ptr(section->mr) +
                       section->offset_within_region;
-    DBG_V("new memory section %lx-%lx sz %lx %p", gpa_start, gpa_end,
-        size, hva_start);
+    // DBG_V("new memory section %lx-%lx sz %lx %p", gpa_start, gpa_end,
+        // size, hva_start);
     if (s->num_trans_entries_tmp > 0) {
         /* Check if we can coalasce the last MemoryRegionSection to
          * the current one. */
@@ -618,9 +648,9 @@ newdev_memli_commit(MemoryListener *listener)
 
 #if NEWDEV_DEBUG > 1
     for (i = 0; i < s->num_trans_entries; i++) {
-        NewdevTranslateEntry *te = s->trans_entries + i;
-        DBG_V("    entry %d: gpa %lx-%lx size %lx hva_start %p", i,
-            te->gpa_start, te->gpa_end, te->size, te->hva_start);
+        //NewdevTranslateEntry *te = s->trans_entries + i;
+        // DBG_V("    entry %d: gpa %lx-%lx size %lx hva_start %p", i,
+            // te->gpa_start, te->gpa_end, te->size, te->hva_start);
     }
 #endif
 
@@ -635,7 +665,7 @@ newdev_memli_commit(MemoryListener *listener)
 
 void* newdev_translate_addr(NewdevState *s, uint64_t gpa, uint64_t len)
 {
-    DBG_V("Inside newdev_translate_addr");
+    // DBG_V("Inside newdev_translate_addr");
     NewdevTranslateEntry *te = s->trans_entries + 0;
 
     if (unlikely(!(te->gpa_start <= gpa && gpa + len <= te->gpa_end))) {
@@ -941,6 +971,8 @@ static void newdev_class_init(ObjectClass *class, void *data)
     
     k->class_id = PCI_CLASS_OTHERS;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    dc->vmsd = &newdev_vmsd;
+
 }
 
 static void newdev_instance_init(Object *obj){    

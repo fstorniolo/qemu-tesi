@@ -66,7 +66,7 @@
 #include "qemu/userfaultfd.h"
 #endif /* defined(__linux__) */
 
-#define RAM_MIGRATION_DEBUG 1
+#define RAM_MIGRATION_DEBUG 2
 
 #if RAM_MIGRATION_DEBUG > 0
 #define DBG(fmt, ...) do { \
@@ -2850,8 +2850,6 @@ static void ram_list_init_bitmaps(void)
              * guest memory.
              */
 
-
-            MemoryRegion* block_mr = block->mr;
             block->bmap = bitmap_new(pages);
             
             bitmap_set(block->bmap, 0, pages);
@@ -2949,7 +2947,7 @@ static void ram_state_resume_prepare(RAMState *rs, QEMUFile *out)
  */
 void qemu_guest_free_page_hint(void *addr, size_t len)
 {
-    DBG("ram-migration: addr: %p len: %lu \n", addr, len);
+    // DBG_V("ram-migration: addr: %p len: %lu \n", addr, len);
     RAMBlock *block;
     ram_addr_t offset;
     size_t used_len, start, npages;
@@ -3014,12 +3012,26 @@ void qemu_guest_free_page_hint(void *addr, size_t len)
 
 static void optimize_setup_phase(NewdevState *newdev)
 {
+
+    DBG_V("Inside optimize_setup_phase");
+
+    // tell the guest to prepare the pages
+    setup_migration_phase_start();
+
+    DBG_V("Requesting thr_mutex_migration");
     qemu_mutex_lock(&newdev->thr_mutex_migration);
+    DBG_V("Inside thr_mutex_migration, waiting for condition");
+
     
     while (!newdev->ready_to_migration)
         qemu_cond_wait(&newdev->thr_cond_migration, &newdev->thr_mutex_migration);
 
+    DBG_V("ready_to_migration true");
+
     qemu_mutex_unlock(&newdev->thr_mutex_migration);
+
+    DBG_V("Unlock mutex migration");
+
 
     unsigned long high_addr_buff, low_addr_buff;
     high_addr_buff = *(newdev->buf + 5);
@@ -3061,9 +3073,13 @@ static void optimize_setup_phase(NewdevState *newdev)
 
         qemu_guest_free_page_hint(new_hva, (4 * 1024) << new_order);
     }
+    DBG_V("Computation ended");
 
+    DBG_V("Requesting thr_mutex_end_1st_round_migration");
 
     qemu_mutex_lock(&newdev->thr_mutex_end_1st_round_migration);
+    DBG_V("Inside thr_mutex_end_1st_round_migration");
+
     newdev->end_1st_round_migration = true;
     qemu_cond_signal(&newdev->thr_cond_end_1st_round_migration);
     qemu_mutex_unlock(&newdev->thr_mutex_end_1st_round_migration);
@@ -3079,16 +3095,18 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
     RAMState **rsp = opaque;
     RAMBlock *block;
 
-    // tell the guest to prepare the pages
-    setup_migration_phase_start();
+    DBG_V("ram_save_setup");
 
     if (compress_threads_save_setup()) {
+        DBG_V("RAM SAVE SETUP WILL RETURN compress_threads_save_setup");
+
         return -1;
     }
 
     /* migration has already setup the bitmap, reuse it. */
     if (!migration_in_colo_state()) {
         if (ram_init_all(rsp) != 0) {
+            DBG_V("RAM SAVE SETUP WILL RETURN ram_init_all != 0");
             compress_threads_save_cleanup();
             return -1;
         }
@@ -3099,7 +3117,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         qemu_put_be64(f, ram_bytes_total_common(true) | RAM_SAVE_FLAG_MEM_SIZE);
 
         RAMBLOCK_FOREACH_MIGRATABLE(block) {
-            DBG_V("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
+            // DBG_V("BLOCK offset: %lx used_length: %lx max_length: %lx  pagesize: %lu", block->offset, block->used_length, block->max_length, block->page_size);
             qemu_put_byte(f, strlen(block->idstr));
             qemu_put_buffer(f, (uint8_t *)block->idstr, strlen(block->idstr));
             qemu_put_be64(f, block->used_length);
@@ -3115,8 +3133,18 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
 
     newdev = get_newdev_state();
 
-    if(newdev->migration_optimization_enabled)
+    if(newdev == NULL)
+        DBG_V("newdev pointer null");
+
+    DBG_V("newdev pointer: %p", newdev);
+    DBG_V("newdev migration_optimization_enabled %d ", newdev->migration_optimization_enabled);
+    DBG_V("newdev irqstatus %d ", newdev->irq_status);
+
+    DBG_V("deciding for optimize_setup_phase");
+    if(newdev->migration_optimization_enabled){
+        DBG_V("call optimize_setup_phase");
         optimize_setup_phase(newdev);
+    }
 
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);
