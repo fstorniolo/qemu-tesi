@@ -278,7 +278,6 @@ static void newdev_io_write(void *opaque, hwaddr addr, uint64_t val, unsigned si
     switch(addr){
         case NEWDEV_REG_RAISE_IRQ:
             newdev_raise_irq(newdev, val);
-            //TO DO Serve il break?
             break;
         case NEWDEV_REG_LOWER_IRQ:
             newdev_lower_irq(newdev, val);
@@ -347,57 +346,6 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             
             switch(myheader->type){
                 case FIRST_ROUND_MIGRATION:
-
-                    #if 0
-                    if(myheader->payload_len % 3 != 0){
-                        DBG("Unexpected payload len in FIRST_ROUND_MIGRATION");
-                        break;
-                    }
-
-                    // Get gpa buffer 
-                    unsigned long high_addr_buff, low_addr_buff;
-                    high_addr_buff = *(newdev->buf + 5 + (myheader->payload_len / 4));
-                    low_addr_buff = *(newdev->buf + 5 +(myheader->payload_len / 4) + 1);
-                    hwaddr address_buffer = (high_addr_buff << 32) + low_addr_buff;
-
-
-
-                    DBG("GPA HighAddress: %lx \n", high_addr_buff);
-                    DBG("GPA LowAddress: %lx \n", low_addr_buff);
-
-                    DBG("GPA Address: %lx \n", address_buffer);
-
-                    unsigned long high_addr, low_addr, order;
-
-                    void* hva_address_buffer;
-                    for(int i = 0; i < myheader->payload_len / 12; i++){
-                        
-                        high_addr = *(newdev->buf + 5 + i * 3);
-                        low_addr = *(newdev->buf + 5 + i * 3 + 1);
-                        order = *(newdev->buf + 5 + i * 3 + 2);
-                        hwaddr free_page_addr = (high_addr << 32) + low_addr + order - order;
-
-                        DBG_V("Address: %lx Order: %lu", free_page_addr, order);
-                        void* hva = translate_gpa_2_hva(free_page_addr);
-                        if(hva != NULL)
-                            DBG_V("Address translated: %p", hva);
-
-
-                        hva_address_buffer = translate_gpa_2_hva(address_buffer);
-                        unsigned long *tmp = hva_address_buffer;
-                        hwaddr new_phys_page = *tmp;
-                        address_buffer += 8;
-
-                        hva_address_buffer = translate_gpa_2_hva(address_buffer);
-                        tmp = hva_address_buffer;
-                        hwaddr new_order  = *tmp;
-                        address_buffer += 8;
-
-                        if(new_order != order || new_phys_page != free_page_addr)
-                            DBG("Diversi \n");
-                    }
-
-                    #endif
 
                     DBG_V("Requesting thr_mutex_migration");
                     qemu_mutex_lock(&newdev->thr_mutex_migration);
