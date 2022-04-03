@@ -42,6 +42,8 @@
 #define PROGRAM_INJECTION_RESULT 					2
 #define PROGRAM_MEMORY_INFO                         3
 #define PROGRAM_SET_MAXIMUM_ORDER                   4
+#define ENABLE_MIGRATION_SETUP_OPTIMIZATION         10
+#define DISABLE_MIGRATION_SETUP_OPTIMIZATION        11
 #define FIRST_ROUND_MIGRATION						20
 #define FIRST_ROUND_MIGRATION_ENDED                 21
 #define FIRST_ROUND_MIGRATION_START                 5

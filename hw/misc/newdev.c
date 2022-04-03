@@ -143,21 +143,19 @@ static void connected_handle_read(void *opaque){
     if(len <= 0){
         DBG("len = %d [<=0] --> connection reset or error. Removing connect_fd, restoring listen_fd\n", len);
         //connection closed[0] or error[<0]
-
-        //Remove connect_fd from watched fd in iothread select
-        qemu_set_fd_handler(newdev->connect_fd, NULL, NULL, NULL);
-        newdev->connect_fd = -1;
-
-        //Add listen_fd from list of watched fd in iothread select
-        qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);  
-        return;
+        goto reset_connection;
     }
     myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
     print_bpf_injection_message(*myheader);   
 
     // Receive message payload. Place it in newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)
     // All those manipulation is because newdev->buf is a pointer to uint32_t so you have to provide offset in bytes/4 or in uint32_t
-    len = recv(newdev->connect_fd, newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
+    if(myheader->payload_len != 0){
+
+        len = recv(newdev->connect_fd, newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
+        if (len <= 0)
+            goto reset_connection;
+    }
 
     switch(myheader->type){
         case PROGRAM_INJECTION:
@@ -185,16 +183,25 @@ static void connected_handle_read(void *opaque){
             // Program is stored in buf. Trigger interrupt to propagate this info
             // to the guest side. Convention::: use interrupt number equal to case
             DBG("PROGRAM_MEMORY_INFO-> interrupt fired");
-            DBG("Payload size: %d", myheader->payload_len);
+            DBG_V("Payload size: %d", myheader->payload_len);
             // newdev_progs_load(newdev);
             newdev_raise_irq(newdev, PROGRAM_MEMORY_INFO);
             break;
 
         case PROGRAM_SET_MAXIMUM_ORDER:
             DBG("PROGRAM_SET_MAXIMUM_ORDER-> interrupt fired");
-            DBG("Payload size: %d", myheader->payload_len);
-            // newdev_progs_load(newdev);
+            DBG_V("Payload size: %d", myheader->payload_len);
             newdev_raise_irq(newdev, PROGRAM_SET_MAXIMUM_ORDER);
+            break;
+
+        case ENABLE_MIGRATION_SETUP_OPTIMIZATION:
+            DBG("ENABLE_MIGRATION_SETUP_OPTIMIZATION");
+            newdev->migration_optimization_enabled = true;
+            break;
+
+        case DISABLE_MIGRATION_SETUP_OPTIMIZATION:
+            DBG("DISABLE_MIGRATION_SETUP_OPTIMIZATION");
+            newdev->migration_optimization_enabled = false;
             break;
             
         default:
@@ -202,7 +209,15 @@ static void connected_handle_read(void *opaque){
             break;
                 //Remove connect_fd from watched fd in iothread select              
     }
-    return;
+
+    reset_connection:
+        //Remove connect_fd from watched fd in iothread select
+        qemu_set_fd_handler(newdev->connect_fd, NULL, NULL, NULL);
+        newdev->connect_fd = -1;
+
+        //Add listen_fd from list of watched fd in iothread select
+        qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);  
+        return;
 }
 
 
@@ -469,6 +484,8 @@ static const VMStateDescription newdev_vmsd = {
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(pdev, NewdevState),
         VMSTATE_BOOL(migration_optimization_enabled, NewdevState),
+        VMSTATE_INT32(listen_fd, NewdevState),
+        VMSTATE_INT32(connect_fd, NewdevState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -865,7 +882,7 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     
     newdev->ready_to_migration = false;
     newdev->end_1st_round_migration = false;
-    newdev->migration_optimization_enabled = true;
+    newdev->migration_optimization_enabled = false;
     DBG("qemu listen_fd added");
 
 

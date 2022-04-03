@@ -3133,19 +3133,19 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
 
     newdev = get_newdev_state();
 
-    if(newdev == NULL)
+    if(newdev == NULL){
         DBG_V("newdev pointer null");
-
-    DBG_V("newdev pointer: %p", newdev);
+        goto iteration;
+    }
     DBG_V("newdev migration_optimization_enabled %d ", newdev->migration_optimization_enabled);
-    DBG_V("newdev irqstatus %d ", newdev->irq_status);
-
     DBG_V("deciding for optimize_setup_phase");
     if(newdev->migration_optimization_enabled){
         DBG_V("call optimize_setup_phase");
         optimize_setup_phase(newdev);
     }
+    DBG_V("after decision");
 
+iteration:
     ram_control_before_iterate(f, RAM_CONTROL_SETUP);
     ram_control_after_iterate(f, RAM_CONTROL_SETUP);
 
