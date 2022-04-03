@@ -100,6 +100,7 @@ static const char *regnames[] = {
 static NewdevState *newdev_p;
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val);
 static void connected_handle_read(void *opaque);
+static int make_socket (uint16_t port);
 // static int newdev_progs_load(NewdevState *s /*const char *progsname, */);
 
 void print_bpf_injection_message(struct bpf_injection_msg_header myheader){
@@ -216,6 +217,7 @@ static void connected_handle_read(void *opaque){
         newdev->connect_fd = -1;
 
         //Add listen_fd from list of watched fd in iothread select
+        DBG("connect handle read: listen_fd  %d", newdev->listen_fd);
         qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);  
         return;
 }
@@ -439,6 +441,52 @@ newdev_progmmio_read(void *opaque, hwaddr addr, unsigned size)
     return *readp;
 }
 
+static int
+pre_save_newdev(void *opaque)
+{
+    NewdevState *newdev = opaque;
+    DBG("pre_load");
+
+    //unset_fd_handler
+    DBG("listen_fd: %d", newdev->listen_fd);
+    if (newdev->listen_fd != -1) {
+        qemu_set_fd_handler(newdev->listen_fd, NULL, NULL, NULL);
+        DBG("close listen_fd");
+        qemu_close(newdev->listen_fd);
+    }
+
+    return 0;
+}
+
+static int
+post_load_newdev(void *opaque, int version_id)
+{
+    NewdevState *newdev = opaque;
+    DBG("post_load");
+
+    // set_fd_handler?
+    newdev->listen_fd = -1;
+    newdev->connect_fd = -1;
+
+    newdev->listen_fd = make_socket(9999);
+    if (newdev->listen_fd < 0){
+        DBG("Error in make_socket");
+        return 0;
+    }
+
+    DBG("socket fd:\t%d", newdev->listen_fd);
+
+    if (listen (newdev->listen_fd, 1) < 0){
+      DBG("listen error\n");
+      return 0;
+    }
+    DBG("listen\n");
+
+    qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);
+
+
+    return 0;
+}
 
 static const MemoryRegionOps newdev_io_ops = {
     .read = newdev_io_read,
@@ -448,7 +496,6 @@ static const MemoryRegionOps newdev_io_ops = {
         .min_access_size = 4,
         .max_access_size = 4,
     },
-
 };
 
 static const MemoryRegionOps newdev_bufmmio_ops = {
@@ -459,7 +506,6 @@ static const MemoryRegionOps newdev_bufmmio_ops = {
         .min_access_size = 4,
         .max_access_size = 4,
     },
-
 };
 
 static const MemoryRegionOps newdev_progmmio_ops = {
@@ -477,10 +523,10 @@ static const MemoryRegionOps newdev_progmmio_ops = {
 
 static const VMStateDescription newdev_vmsd = {
     .name = TYPE_NEWDEV_DEVICE,
-    .version_id = 0,
-    .minimum_version_id = 0,
-    .pre_load = NULL,
-    .post_load = NULL,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .pre_save = pre_save_newdev,
+    .post_load = post_load_newdev,
     .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(pdev, NewdevState),
         VMSTATE_BOOL(migration_optimization_enabled, NewdevState),
